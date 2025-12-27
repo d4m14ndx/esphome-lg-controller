@@ -162,6 +162,7 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
     LgSwitch& purifier_;
     LgSwitch& internal_thermistor_;
     LgSwitch& auto_dry_;
+    LgSwitch* zone_switches_[8];
 
     uint8_t recv_buf_[MsgLen] = {};
     uint32_t recv_buf_len_ = 0;
@@ -192,6 +193,9 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
     uint8_t vane_position_[4] = {0,0,0,0};
     uint8_t fan_speed_[4] = {0,0,0,0};
     uint8_t overheating_ = 0;
+    bool zones_on_[8] = {};
+    uint8_t zone_count_ = 0;
+    bool zone_states_initialized_ = false;
 
     optional<uint32_t> sleep_timer_target_millis_{};
     bool active_reservation_ = false;
@@ -401,6 +405,15 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
             auto_dry_active_.set_internal(!parse_capability(LgCapability::AUTO_DRY));
         }
 
+        uint8_t unit_kind = nvs_storage_.capabilities_message[1] & 0x7;
+        bool duct_unit = unit_kind == 2;
+        bool supports_zone_state = (nvs_storage_.capabilities_message[1] & 0x10) != 0;
+        uint8_t capability_zone_count = 0;
+        if (duct_unit && supports_zone_state) {
+            capability_zone_count = (nvs_storage_.capabilities_message[8] & 0x10) ? 8 : 4;
+        }
+        set_zone_count(capability_zone_count);
+
         internal_thermistor_.set_internal(slave_);
     }
 
@@ -428,6 +441,14 @@ public:
                  LgSwitch* purifier,
                  LgSwitch* internal_thermistor,
                  LgSwitch* auto_dry,
+                 LgSwitch* zone1,
+                 LgSwitch* zone2,
+                 LgSwitch* zone3,
+                 LgSwitch* zone4,
+                 LgSwitch* zone5,
+                 LgSwitch* zone6,
+                 LgSwitch* zone7,
+                 LgSwitch* zone8,
                  bool fahrenheit, bool is_slave_controller)
       : rx_pin_(*rx_pin),
         temperature_sensor_(temperature_sensor),
@@ -455,6 +476,14 @@ public:
         fahrenheit_(fahrenheit),
         slave_(is_slave_controller)
     {
+        zone_switches_[0] = zone1;
+        zone_switches_[1] = zone2;
+        zone_switches_[2] = zone3;
+        zone_switches_[3] = zone4;
+        zone_switches_[4] = zone5;
+        zone_switches_[5] = zone6;
+        zone_switches_[6] = zone7;
+        zone_switches_[7] = zone8;
         vane_select_1_.add_on_state_callback([this](std::string v, size_t index) {
             set_vane_position(1, index);
         });
@@ -496,6 +525,13 @@ public:
         auto_dry_.add_on_state_callback([this](bool) {
             pending_type_a_settings_change_ = true;
         });
+
+        for (size_t i = 0; i < 8; ++i) {
+            zone_switch(i).add_on_state_callback([this, i](bool state) {
+                set_zone_state(i, state);
+            });
+        }
+        set_zone_count(0);
     }
 
     float get_setup_priority() const override {
@@ -560,6 +596,51 @@ public:
     }
 
 private:
+    LgSwitch& zone_switch(size_t index) {
+        if (index >= 8) {
+            ESP_LOGE(TAG, "Unexpected zone index: %u", static_cast<unsigned>(index));
+            return *zone_switches_[0];
+        }
+        return *zone_switches_[index];
+    }
+
+    void set_zone_state(size_t index, bool enabled, bool from_status = false) {
+        if (index >= 8) {
+            ESP_LOGE(TAG, "Unexpected zone index: %u", static_cast<unsigned>(index));
+            return;
+        }
+        if (zone_count_ == 0 || index >= zone_count_) {
+            ESP_LOGD(TAG, "Ignoring zone %u change; zone control not available", static_cast<unsigned>(index + 1));
+            return;
+        }
+        zone_states_initialized_ = true;
+        if (zones_on_[index] == enabled) {
+            // Make sure HA state stays in sync even if the value didn't change.
+            if (from_status) {
+                zone_switch(index).publish_state(enabled);
+            }
+            return;
+        }
+        zones_on_[index] = enabled;
+        zone_switch(index).publish_state(enabled);
+        if (!from_status && !is_initializing_) {
+            pending_status_change_ = true;
+        }
+    }
+
+    void set_zone_count(uint8_t count) {
+        if (count > 8) {
+            count = 8;
+        }
+        zone_count_ = count;
+        for (size_t i = 0; i < 8; ++i) {
+            zone_switch(i).set_internal(i >= zone_count_);
+        }
+        if (zone_count_ == 0) {
+            zone_states_initialized_ = false;
+        }
+    }
+
     // Sets position of vane index (1-4) to position (0-6).
     void set_vane_position(int index, int position) {
         if (index < 1 || index > 4) {
@@ -807,6 +888,23 @@ private:
         if (target - uint8_t(target) == 0.5) {
             send_buf_[5] |= 0x1;
         }
+        if (zone_count_ > 0 && zone_states_initialized_) {
+            send_buf_[5] &= ~0x78;
+            uint8_t zone_bits = 0;
+            if (zone_count_ >= 1 && zones_on_[0]) {
+                zone_bits |= 0x40;
+            }
+            if (zone_count_ >= 2 && zones_on_[1]) {
+                zone_bits |= 0x20;
+            }
+            if (zone_count_ >= 3 && zones_on_[2]) {
+                zone_bits |= 0x10;
+            }
+            if (zone_count_ >= 4 && zones_on_[3]) {
+                zone_bits |= 0x08;
+            }
+            send_buf_[5] |= zone_bits;
+        }
 
         // Byte 6: thermistor setting and target temperature (fractional part in byte 5).
         // Byte 7: room temperature. Preserve the (unknown) upper two bits.
@@ -846,6 +944,23 @@ private:
             send_buf_[8] = timer_kind_sleep << 3;
             send_buf_[8] |= (*minutes >> 8) & 0b111;
             send_buf_[9] = *minutes & 0xff;
+        }
+        if (zone_count_ > 4 && zone_states_initialized_) {
+            send_buf_[10] &= ~0x1E;
+            uint8_t zone_bits = 0;
+            if (zone_count_ >= 5 && zones_on_[4]) {
+                zone_bits |= 0x10;
+            }
+            if (zone_count_ >= 6 && zones_on_[5]) {
+                zone_bits |= 0x08;
+            }
+            if (zone_count_ >= 7 && zones_on_[6]) {
+                zone_bits |= 0x04;
+            }
+            if (zone_count_ >= 8 && zones_on_[7]) {
+                zone_bits |= 0x02;
+            }
+            send_buf_[10] |= zone_bits;
         }
 
         // Byte 11.
@@ -1052,10 +1167,34 @@ private:
             last_outdoor_change_millis_ = millis();
         }
 
-        if (sender == MessageSender::Unit && !auto_dry_.is_internal()) {
+        if (sender == MessageSender::Unit && !auto_dry_.is_internal() && zone_count_ <= 4) {
             bool unit_off = (buffer[1] & 0x2) == 0;
             bool drying = (buffer[10] & 0x10) && unit_off;
             auto_dry_active_.publish_state(drying);
+        }
+        if (zone_count_ > 0) {
+            set_zone_state(0, buffer[5] & 0x40, true);
+            if (zone_count_ >= 2) {
+                set_zone_state(1, buffer[5] & 0x20, true);
+            }
+            if (zone_count_ >= 3) {
+                set_zone_state(2, buffer[5] & 0x10, true);
+            }
+            if (zone_count_ >= 4) {
+                set_zone_state(3, buffer[5] & 0x8, true);
+            }
+            if (zone_count_ > 4) {
+                set_zone_state(4, buffer[10] & 0x10, true);
+                if (zone_count_ >= 6) {
+                    set_zone_state(5, buffer[10] & 0x8, true);
+                }
+                if (zone_count_ >= 7) {
+                    set_zone_state(6, buffer[10] & 0x4, true);
+                }
+                if (zone_count_ >= 8) {
+                    set_zone_state(7, buffer[10] & 0x2, true);
+                }
+            }
         }
 
         bool read_temp = false;
@@ -1303,6 +1442,11 @@ private:
             overheating_select_.publish_state(*overheating_select_.at(overheating));
         } else {
             ESP_LOGE(TAG, "Unexpected overheating value: %u", overheating);
+        }
+
+        uint8_t zones = buffer[10] >> 4;
+        if (zones > 0 && zones <= 8) {
+            set_zone_count(zones);
         }
 
         // Table mapping a byte value to degrees Celsius based on values displayed by PREMTB100.

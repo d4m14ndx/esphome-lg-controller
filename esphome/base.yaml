@@ -148,3 +148,35 @@ climate:
       name: Auto Dry
       id: auto_dry
       icon: mdi:fan-clock
+    zone1:
+      name: Zone 1
+      id: zone1
+      icon: mdi:numeric-1-circle-outline
+    zone2:
+      name: Zone 2
+      id: zone2
+      icon: mdi:numeric-2-circle-outline
+    zone3:
+      name: Zone 3
+      id: zone3
+      icon: mdi:numeric-3-circle-outline
+    zone4:
+      name: Zone 4
+      id: zone4
+      icon: mdi:numeric-4-circle-outline
+    zone5:
+      name: Zone 5
+      id: zone5
+      icon: mdi:numeric-5-circle-outline
+    zone6:
+      name: Zone 6
+      id: zone6
+      icon: mdi:numeric-6-circle-outline
+    zone7:
+      name: Zone 7
+      id: zone7
+      icon: mdi:numeric-7-circle-outline
+    zone8:
+      name: Zone 8
+      id: zone8
+      icon: mdi:numeric-8-circle-outline

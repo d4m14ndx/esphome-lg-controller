@@ -110,6 +110,7 @@ Features currently available in Home Assistant:
 * Sensors for reporting in/mid/out pipe temperatures (if supported by unit).
 * Input field for sleep timer from 0 to 420 minutes (0 turns off the sleep timer).
 * Input fields for fan speed installer setting (to fine-tune fan speeds, 0-255 with 0 being factory default). This is installer setting 3 (ESP Setting) on LG controllers.
+* Zone control for duct units, supporting up to eight zones (if supported by the indoor unit).
 * Select option for over heating installer setting from 0-4 (to change over heating behavior in heating mode). This is installer setting 15 (Over Heating) on LG controllers.
 * YAML options for Fahrenheit mode and 'slave' controller mode.
 * Detects & exposes only supported capabilities for the connected indoor unit.
