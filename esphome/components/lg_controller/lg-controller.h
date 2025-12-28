@@ -408,6 +408,7 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
         uint8_t unit_kind = nvs_storage_.capabilities_message[1] & 0x7;
         bool duct_unit = unit_kind == 2;
         bool supports_zone_state = (nvs_storage_.capabilities_message[1] & 0x10) != 0;
+
         bool supports_8_zones = (nvs_storage_.capabilities_message[8] & 0x10) != 0;
         uint8_t capability_zone_count = 0;
         if (supports_zone_state || duct_unit || supports_8_zones) {
