@@ -1351,6 +1351,10 @@ private:
             }
         }
 
+        // Apply newly received capabilities immediately so zone entities become available without
+        // requiring a restart.
+        configure_capabilities();
+
         is_initializing_ = false;
     }
 
