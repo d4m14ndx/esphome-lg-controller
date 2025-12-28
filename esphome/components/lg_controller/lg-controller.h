@@ -408,9 +408,11 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
         uint8_t unit_kind = nvs_storage_.capabilities_message[1] & 0x7;
         bool duct_unit = unit_kind == 2;
         bool supports_zone_state = (nvs_storage_.capabilities_message[1] & 0x10) != 0;
+
+        bool supports_8_zones = (nvs_storage_.capabilities_message[8] & 0x10) != 0;
         uint8_t capability_zone_count = 0;
-        if (duct_unit && supports_zone_state) {
-            capability_zone_count = (nvs_storage_.capabilities_message[8] & 0x10) ? 8 : 4;
+        if (supports_zone_state || duct_unit || supports_8_zones) {
+            capability_zone_count = supports_8_zones ? 8 : 4;
         }
         set_zone_count(capability_zone_count);
 
@@ -1171,6 +1173,16 @@ private:
             bool unit_off = (buffer[1] & 0x2) == 0;
             bool drying = (buffer[10] & 0x10) && unit_off;
             auto_dry_active_.publish_state(drying);
+        }
+        if (zone_count_ == 0) {
+            // Infer zone count from status bits if capabilities/settings haven't reported it yet.
+            uint8_t lower_zones = buffer[5] & 0x78;
+            uint8_t upper_zones = buffer[10] & 0x1E;
+            if (upper_zones) {
+                set_zone_count(8);
+            } else if (lower_zones) {
+                set_zone_count(4);
+            }
         }
         if (zone_count_ > 0) {
             set_zone_state(0, buffer[5] & 0x40, true);
