@@ -46,6 +46,14 @@ CONF_AUTO_DRY_ACTIVE = "auto_dry_active"
 CONF_PURIFIER = "purifier"
 CONF_INTERNAL_THERMISTOR = "internal_thermistor"
 CONF_AUTO_DRY = "auto_dry"
+CONF_ZONE1 = "zone1"
+CONF_ZONE2 = "zone2"
+CONF_ZONE3 = "zone3"
+CONF_ZONE4 = "zone4"
+CONF_ZONE5 = "zone5"
+CONF_ZONE6 = "zone6"
+CONF_ZONE7 = "zone7"
+CONF_ZONE8 = "zone8"
 
 VANE_OPTIONS = ["0 (Default)", "1 (Up)", "2", "3", "4", "5", "6 (Down)"]
 OVERHEATING_OPTIONS = ["0 (Default)", "1 (+4C/+6C)", "2 (+2C/+4C)", "3 (-1C/+1C)", "4 (-0.5C/+0.5C)"]
@@ -84,6 +92,14 @@ CONFIG_SCHEMA = climate.climate_schema(LgController).extend(
         cv.Required(CONF_PURIFIER): switch.switch_schema(LgSwitch),
         cv.Required(CONF_INTERNAL_THERMISTOR): switch.switch_schema(LgSwitch),
         cv.Required(CONF_AUTO_DRY): switch.switch_schema(LgSwitch),
+        cv.Required(CONF_ZONE1): switch.switch_schema(LgSwitch),
+        cv.Required(CONF_ZONE2): switch.switch_schema(LgSwitch),
+        cv.Required(CONF_ZONE3): switch.switch_schema(LgSwitch),
+        cv.Required(CONF_ZONE4): switch.switch_schema(LgSwitch),
+        cv.Required(CONF_ZONE5): switch.switch_schema(LgSwitch),
+        cv.Required(CONF_ZONE6): switch.switch_schema(LgSwitch),
+        cv.Required(CONF_ZONE7): switch.switch_schema(LgSwitch),
+        cv.Required(CONF_ZONE8): switch.switch_schema(LgSwitch),
     }
 ).extend(cv.COMPONENT_SCHEMA).extend(uart.UART_DEVICE_SCHEMA)
 
@@ -120,6 +136,14 @@ async def to_code(config):
     purifier = await switch.new_switch(config[CONF_PURIFIER])
     internal_thermistor = await switch.new_switch(config[CONF_INTERNAL_THERMISTOR])
     auto_dry = await switch.new_switch(config[CONF_AUTO_DRY])
+    zone1 = await switch.new_switch(config[CONF_ZONE1])
+    zone2 = await switch.new_switch(config[CONF_ZONE2])
+    zone3 = await switch.new_switch(config[CONF_ZONE3])
+    zone4 = await switch.new_switch(config[CONF_ZONE4])
+    zone5 = await switch.new_switch(config[CONF_ZONE5])
+    zone6 = await switch.new_switch(config[CONF_ZONE6])
+    zone7 = await switch.new_switch(config[CONF_ZONE7])
+    zone8 = await switch.new_switch(config[CONF_ZONE8])
 
     var = cg.new_Pvariable(config[CONF_ID], rx_pin, temperature_sensor,
                            vane1, vane2, vane3, vane4, overheating,
@@ -128,6 +152,7 @@ async def to_code(config):
                            error_code, pipe_temp_in, pipe_temp_mid, pipe_temp_out,
                            defrost, preheat, outdoor, auto_dry_active,
                            purifier, internal_thermistor, auto_dry,
+                           zone1, zone2, zone3, zone4, zone5, zone6, zone7, zone8,
                            config[CONF_FAHRENHEIT], config[CONF_IS_SLAVE_CONTROLLER])
     await climate.register_climate(var, config)
     await cg.register_component(var, config)
