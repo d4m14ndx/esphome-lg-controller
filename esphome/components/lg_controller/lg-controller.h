@@ -7,6 +7,10 @@ static const char* const TAG = "lg-controller";
 
 namespace esphome::lg_controller {
 
+// Native implementation for the custom `lg_controller` climate platform. ESPHome generates the
+// wiring to Home Assistant via the Python component in climate.py; this file focuses on the UART
+// protocol and maps ESPHome's climate traits (https://esphome.io/components/climate/) to the LG
+// indoor unit message format.
 static constexpr size_t MIN_TEMP_SETPOINT = 16;
 static constexpr size_t MAX_TEMP_SETPOINT = 30;
 
@@ -17,6 +21,7 @@ class LgSwitch final : public switch_::Switch {
 
 public:
     void restore_and_set_mode(switch_::SwitchRestoreMode mode) {
+        // Mirror ESPHome's switch restore behaviour so HA reflects the saved state on boot.
         set_restore_mode(mode);
         if (auto state = get_initial_state_with_restore_mode()) {
             write_state(*state);
@@ -27,6 +32,7 @@ public:
 class LgSelect final : public select::Select {
     void control(const std::string& value) override {
         if (this->current_option() != value) {
+            // Only publish changes locally; installer settings get sent in batches elsewhere.
             this->publish_state(value); 
         }
     }
@@ -35,6 +41,7 @@ class LgSelect final : public select::Select {
 class LgNumber final : public number::Number {
     void control(float value) override {
         if (this->state != value) {
+            // Persist number changes immediately so they are available when sending 0xCA/0xCB.
             this->publish_state(value); 
         }
     }
@@ -55,6 +62,9 @@ class LgNumber final : public number::Number {
 // These conversions are only used in Fahrenheit mode.
 class TempConversion {
 private:
+    // Precomputed Fahrenheit->LG Celsius mapping derived from the controller display. Values are
+    // doubled to preserve the 0.5°C step. LG uses this non-linear mapping instead of the standard
+    // Fahrenheit to Celsius formula, so we mirror it here.
     static constexpr int8_t FahToLGCel[] = {
         0  /* 32  */, 1  /* 33  */, 2  /* 34  */, 3  /* 35  */, 4  /* 36  */,
         5  /* 37  */, 6  /* 38  */, 7  /* 39  */, 8  /* 40  */, 10 /* 41  */,
@@ -162,6 +172,8 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
     LgSwitch& purifier_;
     LgSwitch& internal_thermistor_;
     LgSwitch& auto_dry_;
+    // Array of per-zone switches; entries are toggled to internal when the unit reports fewer
+    // available zones.
     LgSwitch* zone_switches_[8];
 
     uint8_t recv_buf_[MsgLen] = {};
@@ -237,6 +249,8 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
         AUTO_DRY,
     };
 
+    // Interpret the capability bits from the stored 0xC9 message so we can expose only the modes
+    // and entities the indoor unit supports.
     bool parse_capability(LgCapability capability) {
         switch (capability) {
             case LgCapability::PURIFIER:
@@ -288,6 +302,8 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
     }
 
     void configure_capabilities() {
+        // Map the unit's capability bits to the ClimateTraits ESPHome exposes to Home Assistant.
+        // See https://esphome.io/components/climate/ for how these traits influence the UI.
         // Default traits
         climate::ClimateModeMask device_modes;
         device_modes.insert(climate::CLIMATE_MODE_OFF);
@@ -478,6 +494,7 @@ public:
         fahrenheit_(fahrenheit),
         slave_(is_slave_controller)
     {
+        // Route per-entity callbacks back into the controller so outbound frames are updated.
         zone_switches_[0] = zone1;
         zone_switches_[1] = zone2;
         zone_switches_[2] = zone3;
@@ -542,6 +559,7 @@ public:
 
     void setup() override {
         // Load our custom NVS storage to get the capabilities message
+        // (mirrors ESPHome preference handling at https://esphome.io/components/preferences.html).
         ESPPreferenceObject pref = global_preferences->make_preference<NVSStorage>(this->get_object_id_hash() ^ NVS_STORAGE_VERSION);
         pref.load(&nvs_storage_);
 
@@ -606,6 +624,7 @@ private:
         return *zone_switches_[index];
     }
 
+    // Toggle a zone relay while keeping Home Assistant and the controller state in sync.
     void set_zone_state(size_t index, bool enabled, bool from_status = false) {
         if (index >= 8) {
             ESP_LOGE(TAG, "Unexpected zone index: %u", static_cast<unsigned>(index));
@@ -630,6 +649,7 @@ private:
         }
     }
 
+    // Enable/disable the exposed zone switches to match the unit capability.
     void set_zone_count(uint8_t count) {
         if (count > 8) {
             count = 8;
@@ -765,6 +785,7 @@ private:
         return (result & 0xff) ^ 0x55;
     }
 
+    // Track requested swing mode; if vertical swing stops we need to resend vane positions.
     void set_swing_mode(climate::ClimateSwingMode mode) {
         if (this->swing_mode != mode) {
             // If vertical swing is off, send a 0xAA message to restore the vane position.
@@ -775,6 +796,8 @@ private:
         this->swing_mode = mode;
     }
 
+    // Build and send the 0xA8/0x28 status frame that carries the user-facing climate state.
+    // ESPHome maps climate traits to HA; this mirrors that state onto LG's protocol.
     void send_status_message() {
         // Byte 0: message type.
         send_buf_[0] = slave_ ? 0x28 : 0xA8;
@@ -992,6 +1015,7 @@ private:
         }
     }
 
+    // Send installer "Type A" settings (fan curves, vane positions, auto-dry flag).
     void send_type_a_settings_message() {
         if (last_recv_type_a_settings_[0] != 0xCA && last_recv_type_a_settings_[0] != 0xAA) {
             ESP_LOGE(TAG, "Unexpected missing previous CA/AA message");
@@ -1031,6 +1055,7 @@ private:
         pending_send_ = PendingSendKind::TypeA;
     }
 
+    // Send installer "Type B" settings (overheating offset) and optionally request pipe temps.
     void send_type_b_settings_message(bool timed) {
         if (timed) {
             ESP_LOGD(TAG, "sending timed AB message");
@@ -1516,6 +1541,9 @@ private:
         }
     }
 
+    // Main periodic task invoked by ESPHome's scheduler. We consume UART messages, keep the
+    // controller state machine in sync with Home Assistant, and push any pending frames back to
+    // the indoor unit.
     void update() {
         ESP_LOGD(TAG, "update");
 
