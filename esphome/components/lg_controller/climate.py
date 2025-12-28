@@ -58,6 +58,9 @@ CONF_ZONE8 = "zone8"
 VANE_OPTIONS = ["0 (Default)", "1 (Up)", "2", "3", "4", "5", "6 (Down)"]
 OVERHEATING_OPTIONS = ["0 (Default)", "1 (+4C/+6C)", "2 (+2C/+4C)", "3 (-1C/+1C)", "4 (-0.5C/+0.5C)"]
 
+# This schema mirrors ESPHome's climate component (https://esphome.io/components/climate/)
+# and wires up the custom LG controller entities. Each required entry creates an entity that
+# ultimately feeds into the UART messages in lg-controller.h.
 CONFIG_SCHEMA = climate.climate_schema(LgController).extend(
     {
         cv.Required(CONF_RX_PIN): pins.gpio_input_pin_schema,
@@ -104,6 +107,9 @@ CONFIG_SCHEMA = climate.climate_schema(LgController).extend(
 ).extend(cv.COMPONENT_SCHEMA).extend(uart.UART_DEVICE_SCHEMA)
 
 async def to_code(config):
+    # Build all entities declared in the YAML and pass them into the native controller.
+    # ESPHome will generate the necessary bindings so the C++ implementation can publish
+    # state updates and consume user actions.
     rx_pin = await cg.gpio_pin_expression(config[CONF_RX_PIN])
 
     if CONF_TEMPERATURE_SENSOR in config:
