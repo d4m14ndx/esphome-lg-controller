@@ -1093,6 +1093,11 @@ private:
         // Byte 2 stores installer setting 15.
         send_buf_[2] = (send_buf_[2] & 0xC7) | (overheating_ << 3);
 
+        // Clear pipe temperature fields; we should not send values here.
+        send_buf_[3] = 0;
+        send_buf_[4] = 0;
+        send_buf_[5] = 0;
+
         send_buf_[12] = calc_checksum(send_buf_);
 
         ESP_LOGD(TAG, "sending %s", format_hex_pretty(send_buf_, MsgLen).c_str());
@@ -1490,18 +1495,23 @@ private:
     }
 
     void process_type_b_settings_message(MessageSender sender, const uint8_t* buffer) {
-        // Ignore this message from other controllers.
-        if (sender != MessageSender::Unit) {
+        // Determine whether to process this message based on controller role.
+        bool from_unit = (sender == MessageSender::Unit);
+        bool from_other_controller =
+            (slave_ && sender == MessageSender::Master) || (!slave_ && sender == MessageSender::Slave);
+        if (!from_unit && !from_other_controller) {
             return;
         }
 
-        awaiting_initial_type_b_response_ = false;
+        if (from_unit) {
+            awaiting_initial_type_b_response_ = false;
 
-        // Send installer settings the first time we receive a 0xCB message.
-        bool first_time = last_recv_type_b_settings_[0] == 0;
-        memcpy(last_recv_type_b_settings_, buffer, MsgLen);
-        if (first_time) {
-            pending_type_b_settings_change_ = true;
+            // Send installer settings the first time we receive a 0xCB message.
+            bool first_time = last_recv_type_b_settings_[0] == 0;
+            memcpy(last_recv_type_b_settings_, buffer, MsgLen);
+            if (first_time) {
+                pending_type_b_settings_change_ = true;
+            }
         }
 
         last_sent_recv_type_b_millis_ = millis();
@@ -1514,14 +1524,16 @@ private:
             ESP_LOGE(TAG, "Unexpected overheating value: %u", overheating);
         }
 
-        uint8_t zones = buffer[10] >> 4;
-        if (zones >= 2 && zones <= 8) {
-            set_zone_count(zones);
-        } else if (zones == 0) {
-            // Zone control disabled or unavailable.
-            set_zone_count(0);
-        } else {
-            ESP_LOGE(TAG, "Unexpected zone count value: %u", zones);
+        // Only honor zone count from the peer controller, not from the unit's CB message.
+        if (from_other_controller) {
+            uint8_t zones = buffer[10] >> 4;
+            if (zones >= 2 && zones <= 8) {
+                set_zone_count(zones);
+            } else if (zones == 0) {
+                ESP_LOGD(TAG, "Ignoring zero zone count reported by peer controller");
+            } else {
+                ESP_LOGE(TAG, "Unexpected zone count value: %u", zones);
+            }
         }
 
         // Table mapping a byte value to degrees Celsius based on values displayed by PREMTB100.
@@ -1550,6 +1562,7 @@ private:
         static_assert(sizeof(PipeTempTable) == 256);
         static_assert(PipeTempTable[UINT8_MAX] == INT8_MIN);
 
+        // Pipe temperatures are only reliable when sent by the unit or peer controllers.
         int8_t pipe_temp_in = PipeTempTable[buffer[3]];
         if (pipe_temp_in == INT8_MIN) {
             pipe_temp_in_.set_internal(true);
