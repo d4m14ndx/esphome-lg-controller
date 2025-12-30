@@ -192,6 +192,7 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
     uint8_t send_buf_[MsgLen] = {};
     uint32_t last_sent_status_millis_ = 0;
     uint32_t last_sent_recv_type_b_millis_ = 0;
+    uint32_t last_initial_type_b_request_millis_ = 0;
 
     enum class PendingSendKind : uint8_t { None, Status, TypeA, TypeB };
     PendingSendKind pending_send_ = PendingSendKind::None;
@@ -199,6 +200,8 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
     bool pending_status_change_ = false;
     bool pending_type_a_settings_change_ = false;
     bool pending_type_b_settings_change_ = false;
+    bool pending_initial_type_b_request_ = false;
+    bool awaiting_initial_type_b_response_ = false;
 
     bool is_initializing_ = true;
 
@@ -225,6 +228,7 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
     enum class MessageSender : uint8_t { Unit, Master, Slave };
     // Set if this controller is configured as slave controller.
     const bool slave_;
+    const uint32_t type_b_refresh_interval_ms_;
 
     enum class LgCapability {
         PURIFIER,
@@ -467,7 +471,8 @@ public:
                  LgSwitch* zone6,
                  LgSwitch* zone7,
                  LgSwitch* zone8,
-                 bool fahrenheit, bool is_slave_controller)
+                 bool fahrenheit, bool is_slave_controller,
+                 uint32_t type_b_refresh_interval_seconds)
       : rx_pin_(*rx_pin),
         temperature_sensor_(temperature_sensor),
         vane_select_1_(*vane_select_1),
@@ -492,7 +497,8 @@ public:
         internal_thermistor_(*internal_thermistor),
         auto_dry_(*auto_dry),
         fahrenheit_(fahrenheit),
-        slave_(is_slave_controller)
+        slave_(is_slave_controller),
+        type_b_refresh_interval_ms_(type_b_refresh_interval_seconds * 1000)
     {
         // Route per-entity callbacks back into the controller so outbound frames are updated.
         zone_switches_[0] = zone1;
@@ -591,6 +597,8 @@ public:
         set_timeout("initial_send", 10000, [this]() {
             set_interval("update", 6000, [this]() { update(); });
         });
+
+        pending_initial_type_b_request_ = true;
     }
 
     // Process changes from HA.
@@ -1056,20 +1064,23 @@ private:
     }
 
     // Send installer "Type B" settings (overheating offset) and optionally request pipe temps.
-    void send_type_b_settings_message(bool timed) {
+    void send_type_b_settings_message(bool timed, bool allow_empty = false) {
         if (timed) {
             ESP_LOGD(TAG, "sending timed AB message");
         }
         if (last_recv_type_b_settings_[0] != 0xCB && last_recv_type_b_settings_[0] != 0xAB) {
-            ESP_LOGE(TAG, "Unexpected missing previous CB/AB message");
-            pending_type_b_settings_change_ = false;
-            // Don't try to send another message immediately after.
-            last_sent_recv_type_b_millis_ = millis();
-            return;
+            if (!allow_empty) {
+                ESP_LOGE(TAG, "Unexpected missing previous CB/AB message");
+                pending_type_b_settings_change_ = false;
+                // Don't try to send another message immediately after.
+                last_sent_recv_type_b_millis_ = millis();
+                return;
+            }
+            memset(send_buf_, 0, MsgLen);
+        } else {
+            // Copy settings from the CB/AB message we received.
+            memcpy(send_buf_, last_recv_type_b_settings_, MsgLen);
         }
-
-        // Copy settings from the CB/AB message we received.
-        memcpy(send_buf_, last_recv_type_b_settings_, MsgLen);
         send_buf_[0] = slave_ ? 0x2B : 0xAB;
 
         // Set the high bit of the second byte to request a CB message from the unit.
@@ -1082,13 +1093,19 @@ private:
         // Byte 2 stores installer setting 15.
         send_buf_[2] = (send_buf_[2] & 0xC7) | (overheating_ << 3);
 
+        // Clear pipe temperature fields; we should not send values here.
+        send_buf_[3] = 0;
+        send_buf_[4] = 0;
+        send_buf_[5] = 0;
+
         send_buf_[12] = calc_checksum(send_buf_);
 
         ESP_LOGD(TAG, "sending %s", format_hex_pretty(send_buf_, MsgLen).c_str());
         UARTDevice::write_array(send_buf_, MsgLen);
 
         pending_type_b_settings_change_ = false;
-        pending_send_ = PendingSendKind::TypeB;
+        // Timed requests expect a CB response (not an echo), so don't mark the send as pending.
+        pending_send_ = timed ? PendingSendKind::None : PendingSendKind::TypeB;
         last_sent_recv_type_b_millis_ = millis();
     }
 
@@ -1463,16 +1480,23 @@ private:
     }
 
     void process_type_b_settings_message(MessageSender sender, const uint8_t* buffer) {
-        // Ignore this message from other controllers.
-        if (sender != MessageSender::Unit) {
+        // Determine whether to process this message based on controller role.
+        bool from_unit = (sender == MessageSender::Unit);
+        bool from_other_controller =
+            (slave_ && sender == MessageSender::Master) || (!slave_ && sender == MessageSender::Slave);
+        if (!from_unit && !from_other_controller) {
             return;
         }
 
-        // Send installer settings the first time we receive a 0xCB message.
-        bool first_time = last_recv_type_b_settings_[0] == 0;
-        memcpy(last_recv_type_b_settings_, buffer, MsgLen);
-        if (first_time) {
-            pending_type_b_settings_change_ = true;
+        if (from_unit) {
+            awaiting_initial_type_b_response_ = false;
+
+            // Send installer settings the first time we receive a 0xCB message.
+            bool first_time = last_recv_type_b_settings_[0] == 0;
+            memcpy(last_recv_type_b_settings_, buffer, MsgLen);
+            if (first_time) {
+                pending_type_b_settings_change_ = true;
+            }
         }
 
         last_sent_recv_type_b_millis_ = millis();
@@ -1485,9 +1509,16 @@ private:
             ESP_LOGE(TAG, "Unexpected overheating value: %u", overheating);
         }
 
-        uint8_t zones = buffer[10] >> 4;
-        if (zones > 0 && zones <= 8) {
-            set_zone_count(zones);
+        // Only honor zone count from the peer controller, not from the unit's CB message.
+        if (from_other_controller) {
+            uint8_t zones = buffer[10] >> 4;
+            if (zones >= 2 && zones <= 8) {
+                set_zone_count(zones);
+            } else if (zones == 0) {
+                ESP_LOGD(TAG, "Ignoring zero zone count reported by peer controller");
+            } else {
+                ESP_LOGE(TAG, "Unexpected zone count value: %u", zones);
+            }
         }
 
         // Table mapping a byte value to degrees Celsius based on values displayed by PREMTB100.
@@ -1516,6 +1547,7 @@ private:
         static_assert(sizeof(PipeTempTable) == 256);
         static_assert(PipeTempTable[UINT8_MAX] == INT8_MIN);
 
+        // Pipe temperatures are only reliable when sent by the unit or peer controllers.
         int8_t pipe_temp_in = PipeTempTable[buffer[3]];
         if (pipe_temp_in == INT8_MIN) {
             pipe_temp_in_.set_internal(true);
@@ -1620,7 +1652,14 @@ private:
             }
         }
 
-        if (slave_ && is_initializing_) {
+        if (awaiting_initial_type_b_response_ &&
+            millis_now - last_initial_type_b_request_millis_ > 5000) {
+            ESP_LOGW(TAG, "retrying initial AB request");
+            awaiting_initial_type_b_response_ = false;
+            pending_initial_type_b_request_ = true;
+        }
+
+        if (slave_ && is_initializing_ && !pending_initial_type_b_request_) {
             ESP_LOGD(TAG, "Not sending, waiting for other controller or unit to send first");
             return;
         }
@@ -1651,6 +1690,15 @@ private:
             }
         };
 
+        if (pending_initial_type_b_request_) {
+            if (check_can_send()) {
+                send_type_b_settings_message(/* timed = */ true, /* allow_empty = */ true);
+                pending_initial_type_b_request_ = false;
+                awaiting_initial_type_b_response_ = true;
+                last_initial_type_b_request_millis_ = millis();
+            }
+            return;
+        }
         if (pending_type_a_settings_change_) {
             if (check_can_send()) {
                 send_type_a_settings_message();
@@ -1674,8 +1722,8 @@ private:
             }
             return;
         }
-        // Send an AB message every 10 minutes to request pipe temperature values.
-        if (!slave_ && millis_now - last_sent_recv_type_b_millis_ > 10 * 60 * 1000) {
+        // Send an AB/2B message periodically to request pipe temperature values.
+        if (millis_now - last_sent_recv_type_b_millis_ > type_b_refresh_interval_ms_) {
             if (check_can_send()) {
                 send_type_b_settings_message(/* timed = */ true);
             }
