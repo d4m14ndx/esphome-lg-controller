@@ -46,6 +46,7 @@ CONF_AUTO_DRY_ACTIVE = "auto_dry_active"
 CONF_PURIFIER = "purifier"
 CONF_INTERNAL_THERMISTOR = "internal_thermistor"
 CONF_AUTO_DRY = "auto_dry"
+CONF_TYPE_B_REFRESH_INTERVAL = "type_b_refresh_interval"
 CONF_ZONE1 = "zone1"
 CONF_ZONE2 = "zone2"
 CONF_ZONE3 = "zone3"
@@ -103,6 +104,8 @@ CONFIG_SCHEMA = climate.climate_schema(LgController).extend(
         cv.Required(CONF_ZONE6): switch.switch_schema(LgSwitch),
         cv.Required(CONF_ZONE7): switch.switch_schema(LgSwitch),
         cv.Required(CONF_ZONE8): switch.switch_schema(LgSwitch),
+
+        cv.Optional(CONF_TYPE_B_REFRESH_INTERVAL, default=600): cv.int_range(min=10, max=3600),
     }
 ).extend(cv.COMPONENT_SCHEMA).extend(uart.UART_DEVICE_SCHEMA)
 
@@ -159,7 +162,8 @@ async def to_code(config):
                            defrost, preheat, outdoor, auto_dry_active,
                            purifier, internal_thermistor, auto_dry,
                            zone1, zone2, zone3, zone4, zone5, zone6, zone7, zone8,
-                           config[CONF_FAHRENHEIT], config[CONF_IS_SLAVE_CONTROLLER])
+                           config[CONF_FAHRENHEIT], config[CONF_IS_SLAVE_CONTROLLER],
+                           config[CONF_TYPE_B_REFRESH_INTERVAL])
     await climate.register_climate(var, config)
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)

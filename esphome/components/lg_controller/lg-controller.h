@@ -192,6 +192,7 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
     uint8_t send_buf_[MsgLen] = {};
     uint32_t last_sent_status_millis_ = 0;
     uint32_t last_sent_recv_type_b_millis_ = 0;
+    uint32_t last_initial_type_b_request_millis_ = 0;
 
     enum class PendingSendKind : uint8_t { None, Status, TypeA, TypeB };
     PendingSendKind pending_send_ = PendingSendKind::None;
@@ -199,6 +200,8 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
     bool pending_status_change_ = false;
     bool pending_type_a_settings_change_ = false;
     bool pending_type_b_settings_change_ = false;
+    bool pending_initial_type_b_request_ = false;
+    bool awaiting_initial_type_b_response_ = false;
 
     bool is_initializing_ = true;
 
@@ -225,6 +228,7 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
     enum class MessageSender : uint8_t { Unit, Master, Slave };
     // Set if this controller is configured as slave controller.
     const bool slave_;
+    const uint32_t type_b_refresh_interval_ms_;
 
     enum class LgCapability {
         PURIFIER,
@@ -467,7 +471,8 @@ public:
                  LgSwitch* zone6,
                  LgSwitch* zone7,
                  LgSwitch* zone8,
-                 bool fahrenheit, bool is_slave_controller)
+                 bool fahrenheit, bool is_slave_controller,
+                 uint32_t type_b_refresh_interval_seconds)
       : rx_pin_(*rx_pin),
         temperature_sensor_(temperature_sensor),
         vane_select_1_(*vane_select_1),
@@ -492,7 +497,8 @@ public:
         internal_thermistor_(*internal_thermistor),
         auto_dry_(*auto_dry),
         fahrenheit_(fahrenheit),
-        slave_(is_slave_controller)
+        slave_(is_slave_controller),
+        type_b_refresh_interval_ms_(type_b_refresh_interval_seconds * 1000)
     {
         // Route per-entity callbacks back into the controller so outbound frames are updated.
         zone_switches_[0] = zone1;
@@ -591,6 +597,8 @@ public:
         set_timeout("initial_send", 10000, [this]() {
             set_interval("update", 6000, [this]() { update(); });
         });
+
+        pending_initial_type_b_request_ = true;
     }
 
     // Process changes from HA.
@@ -1092,6 +1100,21 @@ private:
         last_sent_recv_type_b_millis_ = millis();
     }
 
+    // Send initial Type B request to obtain installer settings (zones, etc.) from the unit.
+    void send_initial_type_b_request_message() {
+        memset(send_buf_, 0, MsgLen);
+        send_buf_[0] = slave_ ? 0x2B : 0xAB;
+        send_buf_[1] = 0x80; // Request CB response.
+        send_buf_[12] = calc_checksum(send_buf_);
+
+        ESP_LOGD(TAG, "sending initial AB request %s", format_hex_pretty(send_buf_, MsgLen).c_str());
+        UARTDevice::write_array(send_buf_, MsgLen);
+
+        pending_initial_type_b_request_ = false;
+        awaiting_initial_type_b_response_ = true;
+        last_initial_type_b_request_millis_ = millis();
+    }
+
     void process_message(const uint8_t* buffer, bool* had_error) {
         ESP_LOGD(TAG, "received %s", format_hex_pretty(buffer, MsgLen).c_str());
 
@@ -1468,6 +1491,8 @@ private:
             return;
         }
 
+        awaiting_initial_type_b_response_ = false;
+
         // Send installer settings the first time we receive a 0xCB message.
         bool first_time = last_recv_type_b_settings_[0] == 0;
         memcpy(last_recv_type_b_settings_, buffer, MsgLen);
@@ -1486,8 +1511,13 @@ private:
         }
 
         uint8_t zones = buffer[10] >> 4;
-        if (zones > 0 && zones <= 8) {
+        if (zones >= 2 && zones <= 8) {
             set_zone_count(zones);
+        } else if (zones == 0) {
+            // Zone control disabled or unavailable.
+            set_zone_count(0);
+        } else {
+            ESP_LOGE(TAG, "Unexpected zone count value: %u", zones);
         }
 
         // Table mapping a byte value to degrees Celsius based on values displayed by PREMTB100.
@@ -1620,7 +1650,14 @@ private:
             }
         }
 
-        if (slave_ && is_initializing_) {
+        if (awaiting_initial_type_b_response_ &&
+            millis_now - last_initial_type_b_request_millis_ > 5000) {
+            ESP_LOGW(TAG, "retrying initial AB request");
+            awaiting_initial_type_b_response_ = false;
+            pending_initial_type_b_request_ = true;
+        }
+
+        if (slave_ && is_initializing_ && !pending_initial_type_b_request_) {
             ESP_LOGD(TAG, "Not sending, waiting for other controller or unit to send first");
             return;
         }
@@ -1651,6 +1688,12 @@ private:
             }
         };
 
+        if (pending_initial_type_b_request_) {
+            if (check_can_send()) {
+                send_initial_type_b_request_message();
+            }
+            return;
+        }
         if (pending_type_a_settings_change_) {
             if (check_can_send()) {
                 send_type_a_settings_message();
@@ -1674,8 +1717,8 @@ private:
             }
             return;
         }
-        // Send an AB message every 10 minutes to request pipe temperature values.
-        if (!slave_ && millis_now - last_sent_recv_type_b_millis_ > 10 * 60 * 1000) {
+        // Send an AB/2B message periodically to request pipe temperature values.
+        if (millis_now - last_sent_recv_type_b_millis_ > type_b_refresh_interval_ms_) {
             if (check_can_send()) {
                 send_type_b_settings_message(/* timed = */ true);
             }
