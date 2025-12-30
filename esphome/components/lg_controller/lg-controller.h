@@ -1104,6 +1104,21 @@ private:
         last_sent_recv_type_b_millis_ = millis();
     }
 
+    // Send initial Type B request to obtain installer settings (zones, etc.) from the unit.
+    void send_initial_type_b_request_message() {
+        memset(send_buf_, 0, MsgLen);
+        send_buf_[0] = slave_ ? 0x2B : 0xAB;
+        send_buf_[1] = 0x80; // Request CB response.
+        send_buf_[12] = calc_checksum(send_buf_);
+
+        ESP_LOGD(TAG, "sending initial AB request %s", format_hex_pretty(send_buf_, MsgLen).c_str());
+        UARTDevice::write_array(send_buf_, MsgLen);
+
+        pending_initial_type_b_request_ = false;
+        awaiting_initial_type_b_response_ = true;
+        last_initial_type_b_request_millis_ = millis();
+    }
+
     void process_message(const uint8_t* buffer, bool* had_error) {
         ESP_LOGD(TAG, "received %s", format_hex_pretty(buffer, MsgLen).c_str());
 

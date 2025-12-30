@@ -41,7 +41,10 @@ sensor:
     name: Last Boot
 
 external_components:
-  - source: components
+  - source:
+      type: git
+      url: https://github.com/JanM321/esphome-lg-controller
+      path: esphome
     components: [lg_controller]
 
 climate:
