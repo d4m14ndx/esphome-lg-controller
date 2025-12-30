@@ -1064,20 +1064,23 @@ private:
     }
 
     // Send installer "Type B" settings (overheating offset) and optionally request pipe temps.
-    void send_type_b_settings_message(bool timed) {
+    void send_type_b_settings_message(bool timed, bool allow_empty = false) {
         if (timed) {
             ESP_LOGD(TAG, "sending timed AB message");
         }
         if (last_recv_type_b_settings_[0] != 0xCB && last_recv_type_b_settings_[0] != 0xAB) {
-            ESP_LOGE(TAG, "Unexpected missing previous CB/AB message");
-            pending_type_b_settings_change_ = false;
-            // Don't try to send another message immediately after.
-            last_sent_recv_type_b_millis_ = millis();
-            return;
+            if (!allow_empty) {
+                ESP_LOGE(TAG, "Unexpected missing previous CB/AB message");
+                pending_type_b_settings_change_ = false;
+                // Don't try to send another message immediately after.
+                last_sent_recv_type_b_millis_ = millis();
+                return;
+            }
+            memset(send_buf_, 0, MsgLen);
+        } else {
+            // Copy settings from the CB/AB message we received.
+            memcpy(send_buf_, last_recv_type_b_settings_, MsgLen);
         }
-
-        // Copy settings from the CB/AB message we received.
-        memcpy(send_buf_, last_recv_type_b_settings_, MsgLen);
         send_buf_[0] = slave_ ? 0x2B : 0xAB;
 
         // Set the high bit of the second byte to request a CB message from the unit.
@@ -1096,7 +1099,8 @@ private:
         UARTDevice::write_array(send_buf_, MsgLen);
 
         pending_type_b_settings_change_ = false;
-        pending_send_ = PendingSendKind::TypeB;
+        // Timed requests expect a CB response (not an echo), so don't mark the send as pending.
+        pending_send_ = timed ? PendingSendKind::None : PendingSendKind::TypeB;
         last_sent_recv_type_b_millis_ = millis();
     }
 
@@ -1690,7 +1694,10 @@ private:
 
         if (pending_initial_type_b_request_) {
             if (check_can_send()) {
-                send_initial_type_b_request_message();
+                send_type_b_settings_message(/* timed = */ true, /* allow_empty = */ true);
+                pending_initial_type_b_request_ = false;
+                awaiting_initial_type_b_response_ = true;
+                last_initial_type_b_request_millis_ = millis();
             }
             return;
         }
