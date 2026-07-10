@@ -113,7 +113,7 @@ Features currently available in Home Assistant:
 * Zone control for duct units, supporting up to eight zones (if supported by the indoor unit).
 * Select option for over heating installer setting from 0-4 (to change over heating behavior in heating mode). This is installer setting 15 (Over Heating) on LG controllers.
 * YAML options for Fahrenheit mode and 'slave' controller mode.
-* Detects & exposes only supported capabilities for the connected indoor unit.
+* Detects & exposes only supported operation/fan/swing modes for the connected indoor unit.
 
 The LG ThinQ app and wireless remote can still be used to change these settings and other settings. They'll be synchronized with this controller.
 
