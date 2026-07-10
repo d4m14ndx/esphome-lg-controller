@@ -1,71 +1,82 @@
 # LG Controller component overview
 
-This document explains how the custom `lg_controller` component bridges ESPHome’s climate API to an LG indoor unit over UART. Read this alongside ESPHome’s climate docs (<https://esphome.io/components/climate/>) for the Home Assistant-facing behaviour and the LG protocol reference in `protocol.md`.
+The `lg_controller` component bridges ESPHome's climate API to the reverse-engineered 13-byte LG wired-controller protocol. Read this with [`protocol.md`](../../../protocol.md). Extended fields vary by model, so code coverage does not imply that every field has been validated on every indoor unit.
 
-## High-level structure
+## Structure
 
-### Python glue (`climate.py`)
-* Defines the YAML schema for the component, mirroring `climate` plus dozens of auxiliary entities (vanes, installer fan speeds, sleep timer, zone switches).
-* Instantiates those entities and passes pointers into the native C++ class via `new_Pvariable`.
-* Registers the component as both a `climate` device and a `uart` device so ESPHome generates the bindings and scheduler hooks.
+### `climate.py`
 
-### Native implementation (`lg-controller.h`)
-* Implements `LgController`, which inherits `climate::Climate`, `uart::UARTDevice`, and `Component`.
-* Provides minimal wrapper classes (`LgSwitch`, `LgSelect`, `LgNumber`) so HA/ESPHome state changes feed into the controller without extra transport logic.
-* Encapsulates the LG protocol framing (13-byte messages) and maps ESPHome climate traits to the LG-specific fields.
+The Python layer defines the YAML schema, creates the climate and auxiliary entities, and registers the native controller as an ESPHome component and UART device.
 
-## Key concepts in `LgController`
+The core climate entities remain compatible with existing configurations. Additional protocol telemetry is optional. Zone switches `zone1` through `zone8` are also optional, as is the Type 2 `fan_speed_power` curve. `zone_count`, `type_b_refresh_interval`, `initial_type_b_retries`, and `respond_to_type4` configure protocol behavior.
 
-### Capability detection
-* The unit sends a `0xC9` “capabilities” message; we persist it in NVS so the controller can configure climate traits and enable/disable entities at boot without waiting for a new capabilities frame.
-* `configure_capabilities()` reads those flags to:
-  * Shape the supported modes, fan speeds, and swing options exposed to HA.
-  * Hide entities (vanes, installer fan-speed overrides, overheating select, purifier, auto dry) if unsupported or if the controller is configured as a slave.
-  * Infer zone count (4 or 8) when available and mark unused zone switches as `internal`.
+### `lg-protocol.h`
 
-### Temperature handling
-* LG uses a non-linear Fahrenheit → Celsius mapping that differs from the standard conversion. `TempConversion` contains the lookup tables so HA setpoints and reported values align with what the indoor unit displays.
-* Room temperature uses either an external ESPHome sensor or the unit’s thermistor. External sensors are clamped to 11–35°C and rounded to 0.5°C before transmission.
+This header contains transport-independent helpers for:
 
-### State inputs and callbacks
-* Each select/number/switch entity is given an `add_on_state_callback` that updates internal state (`vane_position_`, `fan_speed_`, `overheating_`, zone flags, etc.) and sets “pending” flags so changes are reflected in the next outbound frame.
-* `restore_and_set_mode` on `LgSwitch` mimics ESPHome’s restore flow so switches rehydrate correctly on boot.
+* Frame header/source recognition and checksum calculation.
+* Incremental rolling parsing of the byte stream.
+* Packed-BCD Type 4 energy encoding/decoding.
+* Exact-count zone bitfield encoding/decoding.
+* Type 3 zone-count encoding/decoding.
 
-### Message types (all 13 bytes)
-* **Status** (`0xA8` from master, `0x28` from slave): carries mode, fan, swing, purifier, target temp, room temp, zones, and sleep timer bits. Built from current ESPHome climate state plus the last received status to preserve unknown bits.
-* **Type A settings** (`0xAA`/`0x2A`): installer fan curves, vane positions, auto-dry flag. We copy the last received `0xCA/0xAA` frame and patch in local overrides.
-* **Type B settings** (`0xAB`/`0x2B`): overheating installer setting; optionally requests a fresh `0xCB` to read pipe temperatures.
-* **Capabilities** (`0xC9`): stored to NVS and used to configure traits; may trigger a reboot on first boot to ensure HA sees the correct trait set.
+Keeping these helpers independent of ESPHome makes the protocol behavior suitable for host-side tests.
 
-### Receive path
-* `update()` drains UART bytes into a fixed-size buffer; when 13 bytes arrive, `process_message()` validates checksum, discerns sender (unit/master/slave), and dispatches by message type.
-* Status frames update HA-visible climate state (mode, fan, swing, target temp, zones, purifier) unless a local send is pending to avoid overwriting unsent changes.
-* Capabilities frames update the stored capability bits and immediately re-run `configure_capabilities()` so entities appear/disappear without reboot.
-* Type A/B frames refresh installer settings, vane positions, overheating select, and pipe temperatures; first-time reception queues a matching outbound frame so the controller pushes its defaults back.
+### `lg-controller.h`
 
-### Send path and scheduling
-* Pending flags (`pending_status_change_`, `pending_type_a_settings_change_`, `pending_type_b_settings_change_`) decide which message to send next.
-* The update loop:
-  * Retries unsatisfied sends (when no echoed frame was seen).
-  * Waits for 500 ms of bus idleness (using direct GPIO reads) to reduce collisions on the shared UART line.
-  * Prioritizes installer setting frames, then status changes, then periodic maintenance:
-    * Type B is sent every 10 minutes to refresh pipe temperatures.
-    * Status is sent every 20 seconds (master only) even without changes.
-* Sleep timer logic mirrors HA: minutes are encoded into the status frame; when the timer elapses, the controller turns the unit off and clears the timer entity while suppressing callback recursion.
+`LgController` inherits `climate::Climate`, `uart::UARTDevice`, and `Component`. It owns the live climate state, received shadow frames, optional telemetry pointers, pending transactions, and the non-blocking transmit scheduler.
 
-### Zones
-* Supports up to 8 zones; zone switches are marked `internal` when unavailable.
-* Incoming status frames can infer zone count when capabilities are missing, and keep HA switches in sync without triggering outbound changes (`from_status` guard).
-* Outbound status frames re-encode zone bitfields so the indoor unit tracks the desired zoning state.
+`LgSwitch` and `LgNumber` distinguish an explicit Home Assistant control call from a state published while decoding the bus. Consequently, a received state update does not queue an unintended write back to the indoor unit.
 
-## Typical data flow
-1. YAML is parsed by ESPHome; `climate.py` builds entities and allocates `LgController`.
-2. On boot, NVS capabilities are loaded; climate traits and entity visibility are set accordingly.
-3. Home Assistant issues a climate change (mode/temp/fan/swing) ➜ callbacks mark `pending_status_change_`.
-4. The next `update()` finds the bus idle and sends a status frame; if swing changed, a Type A frame is queued to restore vane positions.
-5. The indoor unit responds with `0xC8`/`0xCA`/`0xCB` frames, which refresh local mirrors and complete the pending send.
+## Receive path and recovery
 
-## Maintenance tips
-* When adding new settings that travel over Type A/B frames, patch the corresponding `send_type_*` helpers and ensure callbacks set the right pending flag.
-* If you tweak the capability mapping, bump `NVS_STORAGE_VERSION` so stored bits refresh cleanly on next boot.
-* For debugging, enable verbose logging; all inbound/outbound frames are logged via `format_hex_pretty`.
+`loop()` drains UART input continuously. `protocol::FrameParser` first seeks a valid master, slave, or unit header, then checks the checksum after 13 bytes. If a candidate is invalid, it discards one byte and tries again; a dropped/inserted byte or collision therefore does not leave all later frames permanently misaligned. Partial frames are reset after 2.5 seconds of inactivity. Optional `invalid_frames` and `last_unsupported_message` entities aid diagnosis.
+
+After validation, frames are dispatched by their low three type bits:
+
+* **Type 0 status** (`0xA8/0xC8/0x28`) updates climate state and optional filter, energy-saving, ventilation, humidifier, heater, swirl, Fan Auto, robot-clean, cooling, and heating telemetry. Defrost, preheat, outdoor activity, auto-dry activity, and error are accepted from the unit only. Protocol fan codes 5-7 are reported through `fan_mode_code` and preserved until Home Assistant explicitly selects a standard fan mode.
+* **Type 1 capabilities** (`0xC9`) configures supported climate modes, fan modes, swing modes, target minimum, and target step. Changed capabilities are persisted.
+* **Type 2 / Type A settings** (`0xCA/0xAA/0x2A`) updates vane positions, auto-dry, five fan curves when configured, and reported min/max setpoints.
+* **Type 3 / Type B settings** (`0xCB/0xAB/0x2B`) updates overheating, the exact configured zone count, unit-only pipe temperatures, and optional DRED/overcooling/oil/half-degree/heater/group/AP/model/capacity/leak/static-pressure/fan diagnostics. Peer request frames are never used as pipe telemetry.
+* **Type 4 / Type C status** (`0xCC/0xAC/0x2C`) exposes optional filter hours, occupancy, dual-setpoint data, total energy, room temperature, deadband, Himalaya cooling, mosquito-away, and comfort-cooling state.
+* **Type 6 / Type E status** (`0xCE` subtype `0x80`) exposes optional humidity, fan runtime, unit runtime, and 0.1-degree room temperature.
+* **Type 7 / Type F status** (`0xCF`) exposes bytes 2-4 as a raw diagnostic value. The engineering conversion remains intentionally unclaimed.
+
+Type 5, other Type 6 subtypes, and unknown Type 7 fields are reported only through the optional unsupported-frame diagnostic. They are not decoded into controls.
+
+## Send path
+
+The scheduler runs every 250 ms and never waits in a busy loop. Transmission is disabled for the first ten seconds after setup. Thereafter, a frame can be sent only when UART has no pending data, the parser has no partial frame, the RX line is idle, and no bus activity has been seen for at least 500 ms.
+
+After a send, the controller waits up to three seconds for its exact bus echo. A missing/corrupt echo requeues the same transaction kind. Explicit user changes have priority over replies and telemetry refreshes.
+
+The controller sends only these documented subsets:
+
+* **Type 0 status:** climate mode, standard fan mode, swing, purifier, target and room temperatures, thermistor selection, sleep timer, and exact-count zones. Ceiling-height bits and unrelated reservations from the shadow frame are preserved.
+* **Type 2 / Type A:** slow, low, medium, high, and optional power fan curves; vane positions; and auto-dry. A valid received Type 2 shadow is required, and receiving that shadow alone does not queue a write.
+* **Type 3 / Type B:** overheating writes after an explicit local change, or a query with the documented request bit. Pipe-temperature bytes are cleared on transmit.
+* **Type 4 / Type C reply:** when a unit sends `0xCC`, a master with `respond_to_type4: true` mirrors it as `0xAC`. If a valid configured room sensor is available, byte 9 is refreshed first.
+
+Type 5 and incomplete Type 6/7 installer settings are never synthesized.
+
+## Type B polling
+
+Startup first relies on the settings-batch request in the normal Type 0 status frame. If no `0xCB` arrives, a master may send a bounded number of minimal `0xAB` fallback queries. `initial_type_b_retries` controls that limit (`0` disables fallback queries). Installer changes made before the first `0xCB` share this attempt budget.
+
+After initialization, only a master may poll periodically. `type_b_refresh_interval` is in seconds and `0` disables periodic polling. Slave controllers remain passive and never start a Type B query.
+
+## Zones
+
+Zone bits overlap auto-dry/robot-clean fields on some non-zoned or four-zone units. For that reason the component does not infer an installed count from Type 0 activity or from capability flags.
+
+* `zone_count: 1..8` is authoritative.
+* `zone_count: 0` waits for an exact nonzero count in Type 3 byte 10, bounded by the Type 1 capability maximum when known.
+* Type 0 zone state is decoded and encoded only after an exact count is available.
+* YAML only needs to define the optional zone switches that should be exposed.
+* Writes to an unknown or out-of-range zone are rejected and the switch state is restored instead of reporting false success.
+
+## Maintenance and verification
+
+Protocol changes should add or update host-side golden-frame tests before adding a control. In particular, test checksum/resynchronization, source gating, byte-alias behavior, Type B retry bounds, zone counts 1-8, and preservation of unknown/reservation fields.
+
+Receive-only support is preferable for a documented but not hardware-verified field. Promote a field to a control only after its direction, capability gate, valid range, and behavior have been confirmed with real bus captures.

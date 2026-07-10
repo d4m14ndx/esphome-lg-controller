@@ -1,0 +1,60 @@
+esphome:
+  name: lg-controller-esp32-idf
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../esphome/components
+    components: [lg_controller]
+
+uart:
+  - id: ac_serial
+    tx_pin: GPIO25
+    rx_pin:
+      number: GPIO26
+      allow_other_uses: true
+    baud_rate: 104
+
+climate:
+  - platform: lg_controller
+    id: lg_controller_esp32_idf
+    name: LG Controller ESP32 IDF
+    uart_id: ac_serial
+    rx_pin:
+      number: GPIO26
+      allow_other_uses: true
+    fahrenheit: false
+    is_slave_controller: false
+
+    vane1: {id: idf_vane1, internal: true}
+    vane2: {id: idf_vane2, internal: true}
+    vane3: {id: idf_vane3, internal: true}
+    vane4: {id: idf_vane4, internal: true}
+    overheating: {id: idf_overheating, internal: true}
+
+    fan_speed_slow: {id: idf_fan_slow, internal: true}
+    fan_speed_low: {id: idf_fan_low, internal: true}
+    fan_speed_medium: {id: idf_fan_medium, internal: true}
+    fan_speed_high: {id: idf_fan_high, internal: true}
+    sleep_timer: {id: idf_sleep_timer, internal: true}
+
+    error_code: {id: idf_error_code, internal: true}
+    pipe_temp_in: {id: idf_pipe_temp_in, internal: true}
+    pipe_temp_mid: {id: idf_pipe_temp_mid, internal: true}
+    pipe_temp_out: {id: idf_pipe_temp_out, internal: true}
+
+    defrost: {id: idf_defrost, internal: true}
+    preheat: {id: idf_preheat, internal: true}
+    outdoor: {id: idf_outdoor, internal: true}
+    auto_dry_active: {id: idf_auto_dry_active, internal: true}
+
+    purifier: {id: idf_purifier, internal: true}
+    internal_thermistor: {id: idf_internal_thermistor, internal: true}
+    auto_dry: {id: idf_auto_dry, internal: true}

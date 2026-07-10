@@ -5,6 +5,8 @@ Most of these things haven't been tested with an actual AC unit.
 
 NOTE: as explained in the [README](./README.md), this controller actually supports two different protocols. This only documents the more modern protocol that's used by my own AC.
 
+Implementation support is intentionally narrower than the documented bit map. The ESPHome component decodes a number of fields as optional receive-only telemetry, but it only transmits fields whose direction and encoding are sufficiently understood. A field documented below is therefore not automatically an exposed control; see [feature_coverage.md](feature_coverage.md) for the current boundary.
+
 Some information is based on:
 * This post and comments: https://www.instructables.com/Hacking-an-LG-Ducted-Split-for-Home-Automation/
 * Corresponding source code: https://github.com/AussieMakerGeek/LG_Aircon_MQTT_interface
@@ -21,6 +23,8 @@ controllers seem to do something similar.
 My custom controller also checks that each message we send is transmitted uncorrupted and else it tries to send it again. This works because it's a single wire
 bus, so the controller always receives its own messages too.
 
+The ESPHome receive path uses the source/type header and checksum to maintain alignment. Invalid 13-byte candidates are discarded one byte at a time, allowing the parser to recover after noise, a collision, or an inserted/dropped byte. Outgoing work is scheduled without a busy-wait: a send is attempted only after at least 500 ms with no observed bus activity, and the exact echoed frame is checked afterwards.
+
 ## Message format
 Each message is 13 bytes long. The first byte indicates the message type:
 | Bits | Description |
@@ -36,6 +40,21 @@ For instance, `0xC8` is a status message sent by the AC unit. `0xAA` is a settin
 LG controllers send messages with the product type field set to 0 or 2 only when connected to a ventilation product responding with such messages. For example if a heat exchanger unit responds with `0xD0` messages, the LG controllers will switch from sending `0xA8` to `0xB0` messages. This documentation and the ESPHome controller only cover AC units.
 
 The last byte of each message is a checksum, computed by adding up the other bytes and XOR'ing with `0x55`.
+
+### ESPHome implementation scope
+
+The current component handles the message types as follows. These statements describe implemented code paths, not validation on every LG model.
+
+| Protocol type | ESPHome behavior |
+| --- | --- |
+| Type 0 (`...8`) | Read and write the established climate/status subset; optional receive-only operating telemetry. |
+| Type 1 (`...9`) | Read capabilities and use them for climate traits and safe bounds. |
+| Type 2 (`...A`) | Read settings; write fan curves, vanes, and auto-dry only after an explicit local change. |
+| Type 3 (`...B`) | Read settings/telemetry and exact zone count; write overheating or issue bounded master-only queries. |
+| Type 4 (`...C`, called Type C in the code) | Read optional telemetry; optionally mirror a unit `0xCC` as a master `0xAC` reply. |
+| Type 5 (`...D`) | Unsupported apart from optional raw-frame diagnostics; no writes. |
+| Type 6 (`...E`, called Type E in the code) | Decode unit subtype `0x80` as optional telemetry; other subtypes are diagnostic-only. |
+| Type 7 (`...F`, called Type F in the code) | Publish bytes 2-4 as an optional raw diagnostic value; no interpreted controls. |
 
 ## Type 0: Status message (0xA8/0xC8/0x28)
 Status messages are used to control all of the basic settings such as operation mode, fan mode, room temperature, etc.
@@ -100,6 +119,8 @@ The controller and AC unit will send this when a setting changes. The AC unit wi
 |    | `X000_0000` | Set by controller when initializing or for reservation/Fahrenheit settings (see next sections) |
 | 11 | `XXXX_XXXX` | Error value, 0 = no error |
 | 12 | `XXXX_XXXX` | Checksum |
+
+The zone bits in bytes 5 and 10 are aliases for other functions on some models. The component therefore encodes/decodes them only after an exact installed count is known. YAML `zone_count: 1..8` is authoritative; `zone_count: 0` waits for a valid Type 3 byte-10 count. Type 1 capability bits are used only as a maximum, not as proof that four or eight zones are installed.
 
 ### Reservation settings
 Timer-related settings use the reservation flag in byte 3 with type + number of minutes stored in bytes 8 and 9.
@@ -205,6 +226,8 @@ The AC sends this to the controller when it's powered on to tell it which featur
 ## Type 2: Settings (0xAA/0xCA)
 Type 0xA messages store more advanced settings and are only sent when the AC is powered on or when changing settings.
 
+The optional ESPHome `fan_speed_power` number maps to byte 6, alongside the existing slow/low/medium/high fan-curve settings. These fields are written only after an explicit local change and only after a valid Type 2 shadow frame has been received.
+
 | Byte | Bits | Description |
 | --- | --- | --- |
 | 0 | `XXXX_XXXX` | Message type, `0xAA` or `0xCA` |
@@ -231,6 +254,8 @@ Type 0xA messages store more advanced settings and are only sent when the AC is 
 
 ## Type 3: More settings (0xAB/0xCB)
 0xB stores more information and settings (whether Wifi AP mode is on, installer settings, etc).
+
+The ESPHome controller first uses the settings-batch request in its normal startup Type 0 frame. If no `0xCB` follows, only a master may send the minimal `AB 80 ...` query, and the number of startup attempts is bounded by `initial_type_b_retries`. Periodic master polling is controlled by `type_b_refresh_interval`; setting it to `0` disables periodic queries. Slave controllers do not initiate Type B polling.
 
 | Byte | Bits | Description |
 | --- | --- | --- |
@@ -276,12 +301,14 @@ Bytes 3-5 contain pipe temperature values. A higher value indicates a lower temp
 | 0xA0 | 10   | 9    | 9    | 9    | 8    | 8    | 8    | 7    | 7    | 6    | 6    | 6    | 5    | 5    | 5    | 4    |
 | 0xB0 | 4    | 4    | 3    | 3    | 3    | 2    | 2    | 2    | 1    | 1    | 0    | 0    | 0    | 0    | 0    | \-1  |
 | 0xC0 | \-1  | \-2  | \-2  | \-2  | \-3  | \-3  | \-4  | \-4  | \-5  | \-5  | \-5  | \-6  | \-6  | \-7  | \-7  | \-8  |
-| 0xE0 | \-8  | \-9  | \-9  | \-9  | \-10 | \-10 | \-11 | \-11 | \-12 | \-12 | \-13 | \-14 | \-14 | \-15 | \-15 | \-16 |
+| 0xD0 | \-8  | \-9  | \-9  | \-9  | \-10 | \-10 | \-11 | \-11 | \-12 | \-12 | \-13 | \-14 | \-14 | \-15 | \-15 | \-16 |
 | 0xE0 | \-16 | \-17 | \-18 | \-18 | \-19 | \-20 | \-20 | \-21 | \-22 | \-22 | \-23 | \-24 | \-25 | \-26 | \-27 | \-28 |
 | 0xF0 | \-29 | \-   | \-   | \-   | \-   | \-   | \-   | \-   | \-   | \-   | \-   | \-   | \-   | \-   | \-   | \-   |
 
 ## Type 4: More status information (0xAC/0xCC)
 The wall controller sends these regularly and apparently some AC units do this too, but I've never seen this from my unit.
+
+The ESPHome component accepts these telemetry fields from unit `0xCC` frames. When `respond_to_type4` is enabled (the default), a master queues a mirrored `0xAC` reply after the bus becomes idle and replaces byte 9 with its configured room temperature when one is available. This behavior is implemented from the observed PREMTB100 exchange but is not claimed to be required by every unit; it can be disabled in YAML.
 
 | Byte | Bits | Description |
 | --- | --- | --- |
@@ -305,6 +332,9 @@ The wall controller sends these regularly and apparently some AC units do this t
 
 ## Type 5: Advanced settings (0xAD/0xCD)
 My unit sends this after power on with all zeroes. The wall controller uses it for installer settings.
+
+**Implementation status:** unsupported for control. The examples below do not define a complete, safely writable frame format, so the ESPHome component neither decodes them into settings nor transmits Type 5 frames. A valid received frame can be reported through the optional unsupported-message diagnostic.
+
 ```
 Set 25 (auxiliary heater) to duct-type:          ad 04 ...
 Set 36 (use primary heater control) to 1:        ad 40 ...
@@ -315,6 +345,9 @@ Set 41 (simple dry contact setting) to 3:        ad 00 00 00 00 00 03 00 00 00 0
 
 ## Type 6: More settings or status information (0xAE/0xCE)
 The format here is a bit different, with the second byte as additional message type (probably because they ran out of message types).
+
+**Implementation status:** only unit `0xCE` subtype `0x80` is decoded, and only as receive-only humidity, runtime, and precise-temperature telemetry. Subtypes `0x00`, `0x10`, `0x11`, and other values remain unsupported/diagnostic because the examples below are incomplete or uncertain. No Type 6 installer-setting writes are generated.
+
 ```
 CE.00... => extended capabilities message? unit sends this with available settings
 
@@ -347,6 +380,9 @@ AE.80.3C.0F.17.00.2A.74.02.00.12.04.13
 
 ## Type 7: More status information (0xAF/0xCF)
 Used by newer units and controllers. Contains unit's current power usage among other things. Some examples from PREMTB100:
+
+The component currently publishes bytes 2-4 from unit `0xCF` frames as one raw diagnostic integer. It does not label that integer as watts/kilowatts or use the remaining bytes because the engineering conversion and other fields have not been sufficiently verified.
+
 ```
 CF.00.12.34.56.00.00.00.00.00.00.00.3E => 123.5 kW
 CF.00.98.76.54.00.00.00.00.00.00.00.64 => 987.7 kW

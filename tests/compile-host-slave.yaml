@@ -1,0 +1,52 @@
+esphome:
+  name: lg-controller-host-slave
+
+host:
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../esphome/components
+    components: [lg_controller]
+
+uart:
+  - id: ac_serial
+    port: /dev/null
+    baud_rate: 110
+
+climate:
+  - platform: lg_controller
+    id: lg_controller_slave
+    name: LG Controller Host Slave
+    uart_id: ac_serial
+    rx_pin: 0
+    fahrenheit: false
+    is_slave_controller: true
+
+    vane1: {id: slave_vane1, internal: true}
+    vane2: {id: slave_vane2, internal: true}
+    vane3: {id: slave_vane3, internal: true}
+    vane4: {id: slave_vane4, internal: true}
+    overheating: {id: slave_overheating, internal: true}
+
+    fan_speed_slow: {id: slave_fan_slow, internal: true}
+    fan_speed_low: {id: slave_fan_low, internal: true}
+    fan_speed_medium: {id: slave_fan_medium, internal: true}
+    fan_speed_high: {id: slave_fan_high, internal: true}
+    sleep_timer: {id: slave_sleep_timer, internal: true}
+
+    error_code: {id: slave_error_code, internal: true}
+    pipe_temp_in: {id: slave_pipe_temp_in, internal: true}
+    pipe_temp_mid: {id: slave_pipe_temp_mid, internal: true}
+    pipe_temp_out: {id: slave_pipe_temp_out, internal: true}
+
+    defrost: {id: slave_defrost, internal: true}
+    preheat: {id: slave_preheat, internal: true}
+    outdoor: {id: slave_outdoor, internal: true}
+    auto_dry_active: {id: slave_auto_dry_active, internal: true}
+
+    purifier: {id: slave_purifier, internal: true}
+    internal_thermistor: {id: slave_internal_thermistor, internal: true}
+    auto_dry: {id: slave_auto_dry, internal: true}

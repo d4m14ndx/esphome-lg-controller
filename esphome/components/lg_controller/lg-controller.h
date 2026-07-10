@@ -1,7 +1,27 @@
 #pragma once
 
-#include "esphome.h"
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <functional>
+#include <utility>
+
+#include "esphome/core/application.h"
+#include "esphome/core/component.h"
+#include "esphome/core/gpio.h"
+#include "esphome/core/helpers.h"
+#include "esphome/core/log.h"
+#include "esphome/core/preferences.h"
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/climate/climate.h"
+#include "esphome/components/number/number.h"
+#include "esphome/components/select/select.h"
+#include "esphome/components/sensor/sensor.h"
+#include "esphome/components/switch/switch.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/uart/uart.h"
+#include "lg-protocol.h"
 
 static const char* const TAG = "lg-controller";
 
@@ -15,16 +35,36 @@ static constexpr size_t MIN_TEMP_SETPOINT = 16;
 static constexpr size_t MAX_TEMP_SETPOINT = 30;
 
 class LgSwitch final : public switch_::Switch {
+    std::function<void(bool)> control_callback_{};
+    std::function<bool(bool)> control_validator_{};
+
     void write_state(bool value) override {
+        if (control_validator_ && !control_validator_(value)) {
+            // Re-publish the actual value so Home Assistant does not show a command that the
+            // protocol rejected (for example, a zone above the learned installed count).
+            publish_state(this->state);
+            return;
+        }
         publish_state(value);
+        if (control_callback_) {
+            control_callback_(value);
+        }
     }
 
 public:
+    void add_on_control_callback(std::function<void(bool)> callback) {
+        control_callback_ = std::move(callback);
+    }
+
+    void set_control_validator(std::function<bool(bool)> validator) {
+        control_validator_ = std::move(validator);
+    }
+
     void restore_and_set_mode(switch_::SwitchRestoreMode mode) {
         // Mirror ESPHome's switch restore behaviour so HA reflects the saved state on boot.
         set_restore_mode(mode);
         if (auto state = get_initial_state_with_restore_mode()) {
-            write_state(*state);
+            publish_state(*state);
         }
     }
 };
@@ -39,11 +79,21 @@ class LgSelect final : public select::Select {
 };
 
 class LgNumber final : public number::Number {
+    std::function<void(float)> control_callback_{};
+
     void control(float value) override {
         if (this->state != value) {
             // Persist number changes immediately so they are available when sending 0xCA/0xCB.
-            this->publish_state(value); 
+            this->publish_state(value);
         }
+        if (control_callback_) {
+            control_callback_(value);
+        }
+    }
+
+public:
+    void add_on_control_callback(std::function<void(float)> callback) {
+        control_callback_ = std::move(callback);
     }
 };
 
@@ -139,7 +189,7 @@ constexpr int8_t TempConversion::FahToLGCel[];
 constexpr int8_t TempConversion::LGCelToCelAdjustment[];
 
 class LgController final : public climate::Climate, public uart::UARTDevice, public Component {
-    static constexpr size_t MsgLen = 13;
+    static constexpr size_t MsgLen = protocol::kFrameSize;
 
     climate::ClimateTraits supported_traits_{};
 
@@ -156,6 +206,7 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
     LgNumber& fan_speed_low_;
     LgNumber& fan_speed_medium_;
     LgNumber& fan_speed_high_;
+    LgNumber* fan_speed_power_;
 
     LgNumber& sleep_timer_;
 
@@ -172,13 +223,62 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
     LgSwitch& purifier_;
     LgSwitch& internal_thermistor_;
     LgSwitch& auto_dry_;
-    // Array of per-zone switches; entries are toggled to internal when the unit reports fewer
-    // available zones.
-    LgSwitch* zone_switches_[8];
+    LgSwitch* zone_switches_[8] = {};
 
-    uint8_t recv_buf_[MsgLen] = {};
-    uint32_t recv_buf_len_ = 0;
+    struct ProtocolEntities {
+        binary_sensor::BinarySensor* filter_warning = nullptr;
+        binary_sensor::BinarySensor* energy_saving = nullptr;
+        binary_sensor::BinarySensor* external_ventilation = nullptr;
+        binary_sensor::BinarySensor* humidifier_active = nullptr;
+        binary_sensor::BinarySensor* auxiliary_heater_active = nullptr;
+        binary_sensor::BinarySensor* swirl_active = nullptr;
+        binary_sensor::BinarySensor* fan_auto_active = nullptr;
+        binary_sensor::BinarySensor* robot_clean_active = nullptr;
+        binary_sensor::BinarySensor* cooling_active = nullptr;
+        binary_sensor::BinarySensor* heating_active = nullptr;
+        binary_sensor::BinarySensor* oil_warning = nullptr;
+        binary_sensor::BinarySensor* half_degree_control = nullptr;
+        binary_sensor::BinarySensor* emergency_heater = nullptr;
+        binary_sensor::BinarySensor* emergency_heater_fan = nullptr;
+        binary_sensor::BinarySensor* group_control = nullptr;
+        binary_sensor::BinarySensor* wifi_ap = nullptr;
+        binary_sensor::BinarySensor* refrigerant_leak_detector = nullptr;
+        binary_sensor::BinarySensor* occupancy = nullptr;
+        binary_sensor::BinarySensor* dual_setpoint = nullptr;
+        binary_sensor::BinarySensor* himalaya_cooling = nullptr;
+        binary_sensor::BinarySensor* mosquito_away = nullptr;
+        binary_sensor::BinarySensor* comfort_cooling = nullptr;
+
+        sensor::Sensor* fan_mode_code = nullptr;
+        sensor::Sensor* dred_mode = nullptr;
+        sensor::Sensor* overcooling_mode = nullptr;
+        sensor::Sensor* outdoor_model = nullptr;
+        sensor::Sensor* indoor_model = nullptr;
+        sensor::Sensor* model_capacity = nullptr;
+        sensor::Sensor* static_pressure = nullptr;
+        sensor::Sensor* thermal_off_fan_mode = nullptr;
+        sensor::Sensor* low_ambient_heating = nullptr;
+        sensor::Sensor* configured_zone_count = nullptr;
+        sensor::Sensor* filter_time_remaining = nullptr;
+        sensor::Sensor* energy_total = nullptr;
+        sensor::Sensor* high_setpoint = nullptr;
+        sensor::Sensor* low_setpoint = nullptr;
+        sensor::Sensor* type4_room_temperature = nullptr;
+        sensor::Sensor* deadband = nullptr;
+        sensor::Sensor* humidity = nullptr;
+        sensor::Sensor* fan_runtime = nullptr;
+        sensor::Sensor* unit_runtime = nullptr;
+        sensor::Sensor* precise_room_temperature = nullptr;
+        sensor::Sensor* type7_power_raw = nullptr;
+        sensor::Sensor* invalid_frames = nullptr;
+
+        text_sensor::TextSensor* last_unsupported_message = nullptr;
+    } protocol_entities_;
+
+    protocol::FrameParser frame_parser_{};
     uint32_t last_recv_millis_ = 0;
+    uint32_t last_bus_activity_millis_ = 0;
+    uint32_t invalid_frame_count_ = 0;
 
     // Last received 0xC8 message.
     uint8_t last_recv_status_[MsgLen] = {};
@@ -189,32 +289,54 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
     // Last received 0xCB message.
     uint8_t last_recv_type_b_settings_[MsgLen] = {};
 
+    // Last received 0xCC extended status message.
+    uint8_t last_recv_type_c_status_[MsgLen] = {};
+
     uint8_t send_buf_[MsgLen] = {};
     uint32_t last_sent_status_millis_ = 0;
     uint32_t last_sent_recv_type_b_millis_ = 0;
     uint32_t last_initial_type_b_request_millis_ = 0;
+    uint32_t pending_send_millis_ = 0;
 
-    enum class PendingSendKind : uint8_t { None, Status, TypeA, TypeB };
+    using PendingSendKind = protocol::TransactionKind;
     PendingSendKind pending_send_ = PendingSendKind::None;
+    PendingSendKind pending_echo_retry_kind_ = PendingSendKind::None;
+    uint8_t echo_retry_buf_[MsgLen] = {};
+    bool pending_echo_retry_ = false;
+    uint8_t send_echo_retry_count_ = 0;
+    bool status_write_in_flight_ = false;
 
     bool pending_status_change_ = false;
     bool pending_type_a_settings_change_ = false;
     bool pending_type_b_settings_change_ = false;
-    bool pending_initial_type_b_request_ = false;
-    bool awaiting_initial_type_b_response_ = false;
+    bool pending_type_b_query_ = false;
+    bool pending_type_c_response_ = false;
+    bool awaiting_type_b_response_ = false;
+    bool initial_status_sent_ = false;
+    bool transmit_enabled_ = false;
+    uint8_t initial_type_b_request_count_ = 0;
 
     bool is_initializing_ = true;
 
     uint8_t vane_position_[4] = {0,0,0,0};
-    uint8_t fan_speed_[4] = {0,0,0,0};
+    bool vane_dirty_[4] = {};
+    uint8_t fan_speed_[5] = {0,0,0,0,0};
+    bool fan_speed_dirty_[5] = {};
+    bool auto_dry_dirty_ = false;
+    bool preserve_extended_fan_mode_ = false;
     uint8_t overheating_ = 0;
     bool zones_on_[8] = {};
     uint8_t zone_count_ = 0;
-    bool zone_states_initialized_ = false;
+    uint8_t zone_capacity_ = 0;
+    bool zone_protocol_supported_ = false;
+    bool zone_state_known_[8] = {};
+
+    float min_setpoint_ = MIN_TEMP_SETPOINT;
+    float max_setpoint_ = MAX_TEMP_SETPOINT;
+    bool type_a_limits_known_ = false;
 
     optional<uint32_t> sleep_timer_target_millis_{};
     bool active_reservation_ = false;
-    bool ignore_sleep_timer_callback_ = false;
 
     uint32_t NVS_STORAGE_VERSION = 2843654U; // Change version if the NVSStorage struct changes
     struct NVSStorage {
@@ -229,6 +351,9 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
     // Set if this controller is configured as slave controller.
     const bool slave_;
     const uint32_t type_b_refresh_interval_ms_;
+    const uint8_t configured_zone_count_;
+    const uint8_t initial_type_b_retry_count_;
+    const bool respond_to_type_c_;
 
     enum class LgCapability {
         FAN_AUTO,
@@ -263,15 +388,15 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
             case LgCapability::FAN_MEDIUM_HIGH:
                 return (nvs_storage_.capabilities_message[6] & 0x10) != 0;
             case LgCapability::FAN_HIGH:
-                return true;
+                return protocol::supports_high_fan(nvs_storage_.capabilities_message);
             case LgCapability::MODE_HEATING:
-                return (nvs_storage_.capabilities_message[2] & 0x40) != 0;
+                return protocol::supports_heating(nvs_storage_.capabilities_message);
             case LgCapability::MODE_FAN:
-                return (nvs_storage_.capabilities_message[2] & 0x80) != 0;
+                return protocol::supports_fan_mode(nvs_storage_.capabilities_message);
             case LgCapability::MODE_AUTO:
                 return (nvs_storage_.capabilities_message[2] & 0x08) != 0;
             case LgCapability::MODE_DEHUMIDIFY:
-                return (nvs_storage_.capabilities_message[2] & 0x80) != 0;
+                return protocol::supports_dry_mode(nvs_storage_.capabilities_message);
             case LgCapability::VERTICAL_SWING:
                 return (nvs_storage_.capabilities_message[1] & 0x80) != 0;
             case LgCapability::HORIZONTAL_SWING:
@@ -308,8 +433,12 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
         supported_traits_.set_supported_fan_modes(fan_modes);
         supported_traits_.set_supported_swing_modes(swing_modes);
         supported_traits_.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE);
-        supported_traits_.set_visual_min_temperature(MIN_TEMP_SETPOINT);
-        supported_traits_.set_visual_max_temperature(MAX_TEMP_SETPOINT);
+        if (!type_a_limits_known_) {
+            min_setpoint_ = MIN_TEMP_SETPOINT;
+            max_setpoint_ = MAX_TEMP_SETPOINT;
+        }
+        supported_traits_.set_visual_min_temperature(min_setpoint_);
+        supported_traits_.set_visual_max_temperature(max_setpoint_);
         supported_traits_.set_visual_current_temperature_step(fahrenheit_ ? 1 : 0.5);
         supported_traits_.set_visual_target_temperature_step(fahrenheit_ ? 1 : 0.5);
 
@@ -351,17 +480,28 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
             if (parse_capability(LgCapability::HORIZONTAL_SWING))
                 override_swing_modes.insert(climate::CLIMATE_SWING_HORIZONTAL);
             supported_traits_.set_supported_swing_modes(override_swing_modes);
-        }
-        uint8_t unit_kind = nvs_storage_.capabilities_message[1] & 0x7;
-        bool duct_unit = unit_kind == 2;
-        bool supports_zone_state = (nvs_storage_.capabilities_message[1] & 0x10) != 0;
 
-        bool supports_8_zones = (nvs_storage_.capabilities_message[8] & 0x10) != 0;
-        uint8_t capability_zone_count = 0;
-        if (supports_zone_state || duct_unit || supports_8_zones) {
-            capability_zone_count = supports_8_zones ? 8 : 4;
+            // Some units only support whole-degree setpoints and/or a minimum of 18 C.
+            if (!type_a_limits_known_) {
+                min_setpoint_ = (nvs_storage_.capabilities_message[6] & 0x20) ? 16 : 18;
+            }
+            float target_step =
+                fahrenheit_ ? 1.0f : ((nvs_storage_.capabilities_message[5] & 0x20) ? 1.0f : 0.5f);
+            supported_traits_.set_visual_min_temperature(min_setpoint_);
+            supported_traits_.set_visual_max_temperature(max_setpoint_);
+            supported_traits_.set_visual_target_temperature_step(target_step);
         }
-        set_zone_count(capability_zone_count);
+
+        zone_capacity_ = protocol::maximum_zone_count(nvs_storage_.capabilities_message);
+        zone_protocol_supported_ = zone_capacity_ > 0;
+
+        // A configured count is authoritative. In auto mode, wait for the exact Type-B count;
+        // capability bits describe the maximum, not the number actually installed.
+        if (configured_zone_count_ > 0) {
+            set_zone_count(configured_zone_count_);
+        } else if (!zone_protocol_supported_) {
+            set_zone_count(0);
+        }
     }
 
 public:
@@ -376,6 +516,7 @@ public:
                  LgNumber* fan_speed_low,
                  LgNumber* fan_speed_medium,
                  LgNumber* fan_speed_high,
+                 LgNumber* fan_speed_power,
                  LgNumber* sleep_timer,
                  sensor::Sensor* error_code,
                  sensor::Sensor* pipe_temp_in,
@@ -397,7 +538,10 @@ public:
                  LgSwitch* zone7,
                  LgSwitch* zone8,
                  bool fahrenheit, bool is_slave_controller,
-                 uint32_t type_b_refresh_interval_seconds)
+                 uint32_t type_b_refresh_interval_seconds,
+                 uint8_t configured_zone_count,
+                 uint8_t initial_type_b_retry_count,
+                 bool respond_to_type_c)
       : rx_pin_(*rx_pin),
         temperature_sensor_(temperature_sensor),
         vane_select_1_(*vane_select_1),
@@ -409,6 +553,7 @@ public:
         fan_speed_low_(*fan_speed_low),
         fan_speed_medium_(*fan_speed_medium),
         fan_speed_high_(*fan_speed_high),
+        fan_speed_power_(fan_speed_power),
         sleep_timer_(*sleep_timer),
         error_code_(*error_code),
         pipe_temp_in_(*pipe_temp_in),
@@ -423,7 +568,10 @@ public:
         auto_dry_(*auto_dry),
         fahrenheit_(fahrenheit),
         slave_(is_slave_controller),
-        type_b_refresh_interval_ms_(type_b_refresh_interval_seconds * 1000)
+        type_b_refresh_interval_ms_(type_b_refresh_interval_seconds * 1000),
+        configured_zone_count_(configured_zone_count),
+        initial_type_b_retry_count_(initial_type_b_retry_count),
+        respond_to_type_c_(respond_to_type_c)
     {
         // Route per-entity callbacks back into the controller so outbound frames are updated.
         zone_switches_[0] = zone1;
@@ -450,38 +598,99 @@ public:
             set_overheating(index);
         });
 
-        fan_speed_slow_.add_on_state_callback([this](float v) {
+        fan_speed_slow_.add_on_control_callback([this](float v) {
             set_fan_speed(0, v);
         });
-        fan_speed_low_.add_on_state_callback([this](float v) {
+        fan_speed_low_.add_on_control_callback([this](float v) {
             set_fan_speed(1, v);
         });
-        fan_speed_medium_.add_on_state_callback([this](float v) {
+        fan_speed_medium_.add_on_control_callback([this](float v) {
             set_fan_speed(2, v);
         });
-        fan_speed_high_.add_on_state_callback([this](float v) {
+        fan_speed_high_.add_on_control_callback([this](float v) {
             set_fan_speed(3, v);
         });
-        sleep_timer_.add_on_state_callback([this](float v) {
+        if (fan_speed_power_ != nullptr) {
+            fan_speed_power_->add_on_control_callback([this](float v) {
+                set_fan_speed(4, v);
+            });
+        }
+        sleep_timer_.add_on_control_callback([this](float v) {
             set_sleep_timer(v);
         });
 
-        purifier_.add_on_state_callback([this](bool) {
+        purifier_.add_on_control_callback([this](bool) {
             pending_status_change_ = true;
         });
-        internal_thermistor_.add_on_state_callback([this](bool) {
+        internal_thermistor_.add_on_control_callback([this](bool) {
             pending_status_change_ = true;
         });
-        auto_dry_.add_on_state_callback([this](bool) {
+        auto_dry_.add_on_control_callback([this](bool) {
+            auto_dry_dirty_ = true;
             pending_type_a_settings_change_ = true;
         });
 
         for (size_t i = 0; i < 8; ++i) {
-            zone_switch(i).add_on_state_callback([this, i](bool state) {
-                set_zone_state(i, state);
-            });
+            if (zone_switches_[i] != nullptr) {
+                zone_switches_[i]->set_control_validator([this, i](bool) {
+                    return validate_zone_control(i);
+                });
+                zone_switches_[i]->add_on_control_callback([this, i](bool state) {
+                    set_zone_state(i, state);
+                });
+            }
         }
-        set_zone_count(0);
+        set_zone_count(configured_zone_count_);
+    }
+
+    void set_filter_warning_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.filter_warning = entity; }
+    void set_energy_saving_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.energy_saving = entity; }
+    void set_external_ventilation_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.external_ventilation = entity; }
+    void set_humidifier_active_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.humidifier_active = entity; }
+    void set_auxiliary_heater_active_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.auxiliary_heater_active = entity; }
+    void set_swirl_active_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.swirl_active = entity; }
+    void set_fan_auto_active_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.fan_auto_active = entity; }
+    void set_robot_clean_active_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.robot_clean_active = entity; }
+    void set_cooling_active_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.cooling_active = entity; }
+    void set_heating_active_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.heating_active = entity; }
+    void set_oil_warning_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.oil_warning = entity; }
+    void set_half_degree_control_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.half_degree_control = entity; }
+    void set_emergency_heater_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.emergency_heater = entity; }
+    void set_emergency_heater_fan_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.emergency_heater_fan = entity; }
+    void set_group_control_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.group_control = entity; }
+    void set_wifi_ap_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.wifi_ap = entity; }
+    void set_refrigerant_leak_detector_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.refrigerant_leak_detector = entity; }
+    void set_occupancy_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.occupancy = entity; }
+    void set_dual_setpoint_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.dual_setpoint = entity; }
+    void set_himalaya_cooling_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.himalaya_cooling = entity; }
+    void set_mosquito_away_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.mosquito_away = entity; }
+    void set_comfort_cooling_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.comfort_cooling = entity; }
+
+    void set_fan_mode_code_sensor(sensor::Sensor* entity) { protocol_entities_.fan_mode_code = entity; }
+    void set_dred_mode_sensor(sensor::Sensor* entity) { protocol_entities_.dred_mode = entity; }
+    void set_overcooling_mode_sensor(sensor::Sensor* entity) { protocol_entities_.overcooling_mode = entity; }
+    void set_outdoor_model_sensor(sensor::Sensor* entity) { protocol_entities_.outdoor_model = entity; }
+    void set_indoor_model_sensor(sensor::Sensor* entity) { protocol_entities_.indoor_model = entity; }
+    void set_model_capacity_sensor(sensor::Sensor* entity) { protocol_entities_.model_capacity = entity; }
+    void set_static_pressure_sensor(sensor::Sensor* entity) { protocol_entities_.static_pressure = entity; }
+    void set_thermal_off_fan_mode_sensor(sensor::Sensor* entity) { protocol_entities_.thermal_off_fan_mode = entity; }
+    void set_low_ambient_heating_sensor(sensor::Sensor* entity) { protocol_entities_.low_ambient_heating = entity; }
+    void set_configured_zone_count_sensor(sensor::Sensor* entity) { protocol_entities_.configured_zone_count = entity; }
+    void set_filter_time_remaining_sensor(sensor::Sensor* entity) { protocol_entities_.filter_time_remaining = entity; }
+    void set_energy_total_sensor(sensor::Sensor* entity) { protocol_entities_.energy_total = entity; }
+    void set_high_setpoint_sensor(sensor::Sensor* entity) { protocol_entities_.high_setpoint = entity; }
+    void set_low_setpoint_sensor(sensor::Sensor* entity) { protocol_entities_.low_setpoint = entity; }
+    void set_type4_room_temperature_sensor(sensor::Sensor* entity) { protocol_entities_.type4_room_temperature = entity; }
+    void set_deadband_sensor(sensor::Sensor* entity) { protocol_entities_.deadband = entity; }
+    void set_humidity_sensor(sensor::Sensor* entity) { protocol_entities_.humidity = entity; }
+    void set_fan_runtime_sensor(sensor::Sensor* entity) { protocol_entities_.fan_runtime = entity; }
+    void set_unit_runtime_sensor(sensor::Sensor* entity) { protocol_entities_.unit_runtime = entity; }
+    void set_precise_room_temperature_sensor(sensor::Sensor* entity) { protocol_entities_.precise_room_temperature = entity; }
+    void set_type7_power_raw_sensor(sensor::Sensor* entity) { protocol_entities_.type7_power_raw = entity; }
+    void set_invalid_frames_sensor(sensor::Sensor* entity) { protocol_entities_.invalid_frames = entity; }
+
+    void set_last_unsupported_message_text_sensor(text_sensor::TextSensor* entity) {
+        protocol_entities_.last_unsupported_message = entity;
     }
 
     float get_setup_priority() const override {
@@ -516,19 +725,21 @@ public:
             uint8_t b;
             UARTDevice::read_byte(&b);
         }
+        last_bus_activity_millis_ = millis();
         pending_status_change_ = true;
 
-        // Call `update` every 6 seconds, but first wait 10 seconds.
-        set_timeout("initial_send", 10000, [this]() {
-            set_interval("update", 6000, [this]() { update(); });
-        });
-
-        pending_initial_type_b_request_ = true;
+        // Receive continuously in loop(), but give the physical bus and unit ten seconds to
+        // settle before enabling transmissions. The scheduler itself never busy-waits.
+        set_interval("update", 250, [this]() { update(); });
+        set_timeout("initial_send", 10000, [this]() { transmit_enabled_ = true; });
     }
 
     // Process changes from HA.
     void control(const climate::ClimateCall &call) override {
         if (call.get_mode().has_value()) {
+            if (this->mode != *call.get_mode()) {
+                pending_type_a_settings_change_ = true;
+            }
             this->mode = *call.get_mode();
         }
         if (call.get_target_temperature().has_value()) {
@@ -536,6 +747,7 @@ public:
         }
         if (call.get_fan_mode().has_value()) {
             this->fan_mode = *call.get_fan_mode();
+            preserve_extended_fan_mode_ = false;
         }
         if (call.get_swing_mode().has_value()) {
             set_swing_mode(*call.get_swing_mode());
@@ -549,35 +761,38 @@ public:
     }
 
 private:
-    LgSwitch& zone_switch(size_t index) {
+    bool validate_zone_control(size_t index) const {
         if (index >= 8) {
             ESP_LOGE(TAG, "Unexpected zone index: %u", static_cast<unsigned>(index));
-            return *zone_switches_[0];
+            return false;
         }
-        return *zone_switches_[index];
+        if (zone_count_ == 0 || index >= zone_count_) {
+            ESP_LOGD(TAG, "Ignoring zone %u change; zone control not available",
+                     static_cast<unsigned>(index + 1));
+            return false;
+        }
+        return true;
     }
 
     // Toggle a zone relay while keeping Home Assistant and the controller state in sync.
     void set_zone_state(size_t index, bool enabled, bool from_status = false) {
-        if (index >= 8) {
-            ESP_LOGE(TAG, "Unexpected zone index: %u", static_cast<unsigned>(index));
+        if (!validate_zone_control(index)) {
             return;
         }
-        if (zone_count_ == 0 || index >= zone_count_) {
-            ESP_LOGD(TAG, "Ignoring zone %u change; zone control not available", static_cast<unsigned>(index + 1));
-            return;
-        }
-        zone_states_initialized_ = true;
-        if (zones_on_[index] == enabled) {
+        bool changed = !zone_state_known_[index] || zones_on_[index] != enabled;
+        zone_state_known_[index] = true;
+        if (!changed) {
             // Make sure HA state stays in sync even if the value didn't change.
-            if (from_status) {
-                zone_switch(index).publish_state(enabled);
+            if (from_status && zone_switches_[index] != nullptr) {
+                zone_switches_[index]->publish_state(enabled);
             }
             return;
         }
         zones_on_[index] = enabled;
-        zone_switch(index).publish_state(enabled);
-        if (!from_status && !is_initializing_) {
+        if (zone_switches_[index] != nullptr) {
+            zone_switches_[index]->publish_state(enabled);
+        }
+        if (!from_status) {
             pending_status_change_ = true;
         }
     }
@@ -588,11 +803,13 @@ private:
             count = 8;
         }
         zone_count_ = count;
-        for (size_t i = 0; i < 8; ++i) {
-            zone_switch(i).set_internal(i >= zone_count_);
+        if (protocol_entities_.configured_zone_count != nullptr) {
+            protocol_entities_.configured_zone_count->publish_state(zone_count_);
         }
         if (zone_count_ == 0) {
-            zone_states_initialized_ = false;
+            std::fill(zone_state_known_, zone_state_known_ + 8, false);
+        } else {
+            std::fill(zone_state_known_ + zone_count_, zone_state_known_ + 8, false);
         }
     }
 
@@ -611,14 +828,13 @@ private:
         }
         ESP_LOGD(TAG, "Setting vane %d position: %d", index, position);
         vane_position_[index-1] = position;
-        if (!is_initializing_) {
-            pending_type_a_settings_change_ = true;
-        }
+        vane_dirty_[index - 1] = true;
+        pending_type_a_settings_change_ = true;
     }
 
-    // Sets installer setting fan speed index (0-3 for slow-high) to value (0-255), with "0" being the factory default
+    // Sets installer fan speed index (0-4 for slow-power) to 0-255; zero is factory default.
     void set_fan_speed(int index, int value) {
-        if (index < 0 || index > 3) {
+        if (index < 0 || index > 4) {
             ESP_LOGE(TAG, "Unexpected fan speed index: %d", index);
             return;
         }
@@ -632,9 +848,8 @@ private:
         }
 
         fan_speed_[index] = value;
-        if (!is_initializing_) {
-            pending_type_a_settings_change_ = true;
-        }
+        fan_speed_dirty_[index] = true;
+        pending_type_a_settings_change_ = true;
     }
 
     // Set overheating installer setting 15 to 0-4.
@@ -651,15 +866,10 @@ private:
         ESP_LOGD(TAG, "Setting overheating installer setting: %d", value);
 
         overheating_ = value;
-        if (!is_initializing_) {
-            pending_type_b_settings_change_ = true;
-        }
+        pending_type_b_settings_change_ = true;
     }
 
     void set_sleep_timer(int minutes) {
-        if (ignore_sleep_timer_callback_) {
-            return;
-        }
         // 0 clears the timer. Accept max 7 hours.
         if (minutes < 0 || minutes > 7 * 60) {
             ESP_LOGE(TAG, "Ignoring invalid sleep timer value: %d minutes", minutes);
@@ -711,16 +921,12 @@ private:
     }
 
     static uint8_t calc_checksum(const uint8_t* buffer) {
-        size_t result = 0;
-        for (size_t i = 0; i < 12; i++) {
-            result += buffer[i];
-        }
-        return (result & 0xff) ^ 0x55;
+        return protocol::calculate_checksum(buffer);
     }
 
     // Track requested swing mode; if vertical swing stops we need to resend vane positions.
-    void set_swing_mode(climate::ClimateSwingMode mode) {
-        if (this->swing_mode != mode) {
+    void set_swing_mode(climate::ClimateSwingMode mode, bool from_status = false) {
+        if (!from_status && this->swing_mode != mode) {
             // If vertical swing is off, send a 0xAA message to restore the vane position.
             if (mode == climate::CLIMATE_SWING_OFF || mode == climate::CLIMATE_SWING_HORIZONTAL) {
                 pending_type_a_settings_change_ = true;
@@ -732,6 +938,8 @@ private:
     // Build and send the 0xA8/0x28 status frame that carries the user-facing climate state.
     // ESPHome maps climate traits to HA; this mirrors that state onto LG's protocol.
     void send_status_message() {
+        bool initialization_request = !initial_status_sent_ && !slave_;
+
         // Byte 0: message type.
         send_buf_[0] = slave_ ? 0x28 : 0xA8;
 
@@ -766,8 +974,11 @@ private:
                 break;
         }
         
-        // Fix: Check if fan_mode has a value before dereferencing
-        if (this->fan_mode.has_value()) {
+        // Preserve protocol-only low-medium, medium-high and power speeds until HA explicitly
+        // selects a standard fan mode. This prevents periodic status frames downgrading them.
+        if (preserve_extended_fan_mode_) {
+            b |= last_recv_status_[1] & 0xE0;
+        } else if (this->fan_mode.has_value()) {
             switch (this->fan_mode.value()) {
                 case climate::CLIMATE_FAN_LOW:
                     b |= 0 << 5;
@@ -834,10 +1045,10 @@ private:
         if (fahrenheit_) {
             target = TempConversion::celsius_to_lgcelsius(target);
         }
-        if (target < MIN_TEMP_SETPOINT) {
-            target = MIN_TEMP_SETPOINT;
-        } else if (target > MAX_TEMP_SETPOINT) {
-            target = MAX_TEMP_SETPOINT;
+        if (target < min_setpoint_) {
+            target = min_setpoint_;
+        } else if (target > max_setpoint_) {
+            target = max_setpoint_;
         }
 
         // Byte 5. Unchanged except for the low bit which indicates the target temperature has a
@@ -845,23 +1056,6 @@ private:
         send_buf_[5] = last_recv_status_[5] & ~0x1;
         if (target - uint8_t(target) == 0.5) {
             send_buf_[5] |= 0x1;
-        }
-        if (zone_count_ > 0 && zone_states_initialized_) {
-            send_buf_[5] &= ~0x78;
-            uint8_t zone_bits = 0;
-            if (zone_count_ >= 1 && zones_on_[0]) {
-                zone_bits |= 0x40;
-            }
-            if (zone_count_ >= 2 && zones_on_[1]) {
-                zone_bits |= 0x20;
-            }
-            if (zone_count_ >= 3 && zones_on_[2]) {
-                zone_bits |= 0x10;
-            }
-            if (zone_count_ >= 4 && zones_on_[3]) {
-                zone_bits |= 0x08;
-            }
-            send_buf_[5] |= zone_bits;
         }
 
         // Byte 6: thermistor setting and target temperature (fractional part in byte 5).
@@ -878,15 +1072,18 @@ private:
             thermistor = ThermistorSetting::Unit;
             temp = 20;
         }
-        send_buf_[6] = (thermistor << 4) | ((uint8_t(target) - 15) & 0xf);
+        // Preserve ceiling-height bits 6-7 while replacing thermistor and target fields.
+        send_buf_[6] = (last_recv_status_[6] & 0xC0) | (thermistor << 4) |
+                       ((uint8_t(target) - 15) & 0xf);
         send_buf_[7] = (last_recv_status_[7] & 0xC0) | uint8_t((temp - 10) * 2);
 
-        // Bytes 8-10. Initialize bytes 8-9 to 0 to not echo back timer settings set by the AC.
-        send_buf_[8] = 0;
-        send_buf_[9] = 0;
+        // Preserve reservation data we do not own. Clearing bytes 8-9 while leaving the active
+        // reservation flag set can corrupt turn-on/off reservations created by another control.
+        send_buf_[8] = active_reservation_ ? last_recv_status_[8] : 0;
+        send_buf_[9] = active_reservation_ ? last_recv_status_[9] : 0;
         send_buf_[10] = last_recv_status_[10];
 
-        if (is_initializing_) {
+        if (initialization_request) {
             // Request settings when controller turns on.
             send_buf_[8] |= 0x40;
             // Set bit 0x80 of byte 10 to use byte 9 for the Fahrenheit setting flag (0x40).
@@ -903,22 +1100,15 @@ private:
             send_buf_[8] |= (*minutes >> 8) & 0b111;
             send_buf_[9] = *minutes & 0xff;
         }
-        if (zone_count_ > 4 && zone_states_initialized_) {
-            send_buf_[10] &= ~0x1E;
-            uint8_t zone_bits = 0;
-            if (zone_count_ >= 5 && zones_on_[4]) {
-                zone_bits |= 0x10;
-            }
-            if (zone_count_ >= 6 && zones_on_[5]) {
-                zone_bits |= 0x08;
-            }
-            if (zone_count_ >= 7 && zones_on_[6]) {
-                zone_bits |= 0x04;
-            }
-            if (zone_count_ >= 8 && zones_on_[7]) {
-                zone_bits |= 0x02;
-            }
-            send_buf_[10] |= zone_bits;
+        if (zone_count_ > 0) {
+            protocol::Frame status_frame{};
+            protocol::ZoneStates zone_states{};
+            protocol::ZoneStates controlled_zones{};
+            std::copy(send_buf_, send_buf_ + MsgLen, status_frame.begin());
+            std::copy(zones_on_, zones_on_ + 8, zone_states.begin());
+            std::copy(zone_state_known_, zone_state_known_ + 8, controlled_zones.begin());
+            protocol::encode_status_zones(status_frame, zone_count_, zone_states, controlled_zones);
+            std::copy(status_frame.begin(), status_frame.end(), send_buf_);
         }
 
         // Byte 11.
@@ -930,9 +1120,15 @@ private:
         ESP_LOGD(TAG, "sending %s", format_hex_pretty(send_buf_, MsgLen).c_str());
         UARTDevice::write_array(send_buf_, MsgLen);
 
+        status_write_in_flight_ = pending_status_change_;
         pending_status_change_ = false;
         pending_send_ = PendingSendKind::Status;
+        pending_send_millis_ = millis();
         last_sent_status_millis_ = millis();
+        if (initialization_request) {
+            initial_status_sent_ = true;
+            last_initial_type_b_request_millis_ = millis();
+        }
 
         // If we sent an updated temperature to the AC, update temperature in HA too.
         // Slave controller temperature sensor is ignored.
@@ -949,11 +1145,10 @@ private:
     }
 
     // Send installer "Type A" settings (fan curves, vane positions, auto-dry flag).
-    void send_type_a_settings_message() {
+    bool send_type_a_settings_message() {
         if (last_recv_type_a_settings_[0] != 0xCA && last_recv_type_a_settings_[0] != 0xAA) {
-            ESP_LOGE(TAG, "Unexpected missing previous CA/AA message");
-            pending_type_a_settings_change_ = false;
-            return;
+            ESP_LOGW(TAG, "Cannot send Type-A settings before receiving CA/AA");
+            return false;
         }
 
         // Copy settings from the CA/AA message we received.
@@ -965,6 +1160,9 @@ private:
         send_buf_[3] = fan_speed_[1];
         send_buf_[4] = fan_speed_[2];
         send_buf_[5] = fan_speed_[3];
+        if (fan_speed_power_ != nullptr) {
+            send_buf_[6] = fan_speed_[4];
+        }
 
         // Bytes 7-8 store vane positions.
         send_buf_[7] = (send_buf_[7] & 0xf0) | (vane_position_[0] & 0x0f); // Set vane 1
@@ -985,22 +1183,26 @@ private:
         UARTDevice::write_array(send_buf_, MsgLen);
 
         pending_type_a_settings_change_ = false;
+        std::fill(vane_dirty_, vane_dirty_ + 4, false);
+        std::fill(fan_speed_dirty_, fan_speed_dirty_ + 5, false);
+        auto_dry_dirty_ = false;
         pending_send_ = PendingSendKind::TypeA;
+        pending_send_millis_ = millis();
+        return true;
     }
 
-    // Send installer "Type B" settings (overheating offset) and optionally request pipe temps.
-    void send_type_b_settings_message(bool timed, bool allow_empty = false) {
-        if (timed) {
-            ESP_LOGD(TAG, "sending timed AB message");
+    // Send installer Type-B settings or a bounded query for a fresh CB response.
+    bool send_type_b_settings_message(bool query, bool allow_empty = false) {
+        if (query) {
+            ESP_LOGD(TAG, "sending Type-B query");
         }
         if (last_recv_type_b_settings_[0] != 0xCB && last_recv_type_b_settings_[0] != 0xAB) {
             if (!allow_empty) {
-                ESP_LOGE(TAG, "Unexpected missing previous CB/AB message");
-                pending_type_b_settings_change_ = false;
-                // Don't try to send another message immediately after.
-                last_sent_recv_type_b_millis_ = millis();
-                return;
+                ESP_LOGW(TAG, "Cannot send Type-B settings before receiving CB/AB");
+                return false;
             }
+            // AB.80 is the documented minimal query. It is only used after the normal A8
+            // initialization request has timed out, and retries are bounded by configuration.
             memset(send_buf_, 0, MsgLen);
         } else {
             // Copy settings from the CB/AB message we received.
@@ -1009,7 +1211,7 @@ private:
         send_buf_[0] = slave_ ? 0x2B : 0xAB;
 
         // Set the high bit of the second byte to request a CB message from the unit.
-        if (timed) {
+        if (query) {
             send_buf_[1] |= 0x80;
         } else {
             send_buf_[1] &= ~0x80;
@@ -1028,46 +1230,29 @@ private:
         ESP_LOGD(TAG, "sending %s", format_hex_pretty(send_buf_, MsgLen).c_str());
         UARTDevice::write_array(send_buf_, MsgLen);
 
-        pending_type_b_settings_change_ = false;
-        // Timed requests expect a CB response (not an echo), so don't mark the send as pending.
-        pending_send_ = timed ? PendingSendKind::None : PendingSendKind::TypeB;
-        last_sent_recv_type_b_millis_ = millis();
-    }
-
-    // Send initial Type B request to obtain installer settings (zones, etc.) from the unit.
-    void send_initial_type_b_request_message() {
-        memset(send_buf_, 0, MsgLen);
-        send_buf_[0] = slave_ ? 0x2B : 0xAB;
-        send_buf_[1] = 0x80; // Request CB response.
-        send_buf_[12] = calc_checksum(send_buf_);
-
-        ESP_LOGD(TAG, "sending initial AB request %s", format_hex_pretty(send_buf_, MsgLen).c_str());
-        UARTDevice::write_array(send_buf_, MsgLen);
-
-        pending_initial_type_b_request_ = false;
-        awaiting_initial_type_b_response_ = true;
-        last_initial_type_b_request_millis_ = millis();
-    }
-
-    void process_message(const uint8_t* buffer, bool* had_error) {
-        ESP_LOGD(TAG, "received %s", format_hex_pretty(buffer, MsgLen).c_str());
-
-        if (calc_checksum(buffer) != buffer[12]) {
-            // When initializing, the unit sends an all-zeroes message as padding between
-            // messages. Ignore those false checksum failures.
-            auto is_zero = [](uint8_t b) { return b == 0; };
-            if (std::all_of(buffer, buffer + MsgLen, is_zero)) {
-                ESP_LOGD(TAG, "Ignoring padding message sent by unit");
-                return;
-            }
-            ESP_LOGE(TAG, "invalid checksum %s", format_hex_pretty(buffer, MsgLen).c_str());
-            *had_error = true;
-            return;
+        uint32_t now = millis();
+        pending_type_b_settings_change_ = query ? pending_type_b_settings_change_ : false;
+        pending_type_b_query_ = query ? false : pending_type_b_query_;
+        pending_send_ = query ? PendingSendKind::TypeBQuery : PendingSendKind::TypeBWrite;
+        pending_send_millis_ = now;
+        last_sent_recv_type_b_millis_ = now;
+        if (query) {
+            awaiting_type_b_response_ = true;
+            last_initial_type_b_request_millis_ = now;
         }
+        return true;
+    }
+
+    void process_message(const uint8_t* buffer) {
+        ESP_LOGD(TAG, "received %s", format_hex_pretty(buffer, MsgLen).c_str());
 
         if (pending_send_ != PendingSendKind::None && memcmp(send_buf_, buffer, MsgLen) == 0) {
             ESP_LOGD(TAG, "verified send");
+            if (pending_send_ == PendingSendKind::Status) {
+                status_write_in_flight_ = false;
+            }
             pending_send_ = PendingSendKind::None;
+            send_echo_retry_count_ = 0;
             return;
         }
 
@@ -1097,7 +1282,7 @@ private:
 
         switch (buffer[0] & 0b111) {
             case 0: // 0xC8/A8/28
-                process_status_message(*sender, buffer, had_error);
+                process_status_message(*sender, buffer);
                 break;
             case 1: // 0xC9
                 process_capabilities_message(*sender, buffer);
@@ -1108,87 +1293,97 @@ private:
             case 3: // 0xCB/AB/2B
                 process_type_b_settings_message(*sender, buffer);
                 break;
+            case 4: // 0xCC/AC/2C
+                process_type_c_status_message(*sender, buffer);
+                break;
+            case 6: // 0xCE/AE/2E
+                process_type_e_message(*sender, buffer);
+                break;
+            case 7: // 0xCF/AF/2F
+                process_type_f_message(*sender, buffer);
+                break;
             default:
+                publish_unsupported_message(buffer);
                 return;
         }
     }
 
-    void process_status_message(MessageSender sender, const uint8_t* buffer, bool* had_error) {
-        // If we just had a failure, ignore this messsage because it might be invalid too.
-        if (*had_error) {
-            ESP_LOGE(TAG, "ignoring due to previous error %s",
-                     format_hex_pretty(buffer, MsgLen).c_str());
-            return;
-        }
-
+    void process_status_message(MessageSender sender, const uint8_t* buffer) {
         // Consider slave controller initialized if we received a status message from the other
         // controller or the unit.
         if (slave_) {
             is_initializing_ = false;
         }
 
-        // Handle simple input sensors first. These are safe to update even if we have a pending
-        // change.
-
-        defrost_.publish_state(buffer[3] & 0x4);
-        preheat_.publish_state(buffer[3] & 0x8);
-
+        // Unit-only telemetry must not be cleared by a peer controller's status frame.
         if (sender == MessageSender::Unit) {
+            // A unit status supersedes an unchanged heartbeat that is only awaiting its echo.
+            // Never retry a stale heartbeat over a newer app/remote state.
+            if (!status_write_in_flight_ && pending_send_ == PendingSendKind::Status) {
+                pending_send_ = PendingSendKind::None;
+                send_echo_retry_count_ = 0;
+            }
+            if (!status_write_in_flight_ &&
+                pending_echo_retry_kind_ == PendingSendKind::Status) {
+                pending_echo_retry_kind_ = PendingSendKind::None;
+                pending_echo_retry_ = false;
+                send_echo_retry_count_ = 0;
+            }
+
+            defrost_.publish_state(buffer[3] & 0x4);
+            preheat_.publish_state(buffer[3] & 0x8);
             error_code_.publish_state(buffer[11]);
+
+            // When turning on the outdoor unit, some units briefly report ON => OFF => ON.
+            // Only advance the debounce timestamp when a state is actually published.
+            bool outdoor_on = (buffer[5] & 0x4) != 0;
+            if (outdoor_.state != outdoor_on &&
+                (outdoor_on || millis() - last_outdoor_change_millis_ > 8000)) {
+                outdoor_.publish_state(outdoor_on);
+                last_outdoor_change_millis_ = millis();
+            }
+
+            if (zone_count_ <= 4) {
+                bool unit_off = (buffer[1] & 0x2) == 0;
+                auto_dry_active_.publish_state((buffer[10] & 0x10) && unit_off);
+            }
+
+            if (protocol_entities_.filter_warning != nullptr) {
+                protocol_entities_.filter_warning->publish_state(buffer[2] & 0x01);
+            }
+            if (protocol_entities_.energy_saving != nullptr) {
+                protocol_entities_.energy_saving->publish_state(buffer[5] & 0x02);
+            }
+            if (protocol_entities_.external_ventilation != nullptr) {
+                protocol_entities_.external_ventilation->publish_state(buffer[3] & 0x01);
+            }
+            if (protocol_entities_.humidifier_active != nullptr) {
+                protocol_entities_.humidifier_active->publish_state(buffer[2] & 0x08);
+            }
+            if (protocol_entities_.auxiliary_heater_active != nullptr) {
+                protocol_entities_.auxiliary_heater_active->publish_state(buffer[2] & 0x10);
+            }
+            if (protocol_entities_.swirl_active != nullptr) {
+                protocol_entities_.swirl_active->publish_state(buffer[2] & 0x20);
+            }
+            if (protocol_entities_.fan_auto_active != nullptr) {
+                protocol_entities_.fan_auto_active->publish_state(buffer[3] & 0x02);
+            }
+            if (protocol_entities_.robot_clean_active != nullptr && zone_count_ <= 4) {
+                protocol_entities_.robot_clean_active->publish_state(buffer[10] & 0x08);
+            }
+            if (protocol_entities_.cooling_active != nullptr) {
+                protocol_entities_.cooling_active->publish_state(buffer[7] & 0x40);
+            }
+            if (protocol_entities_.heating_active != nullptr) {
+                protocol_entities_.heating_active->publish_state(buffer[7] & 0x80);
+            }
         }
 
-        // When turning on the outdoor unit, the AC sometimes reports ON => OFF => ON within a
-        // few seconds. No big deal but it causes noisy state changes in HA. Only report OFF if
-        // the last state change was at least 8 seconds ago.
-        bool outdoor_on = buffer[5] & 0x4;
-        bool outdoor_changed = outdoor_.state != outdoor_on;
-        if (outdoor_on) {
-            outdoor_.publish_state(true);
-        } else if (millis() - last_outdoor_change_millis_ > 8000) {
-            outdoor_.publish_state(false);
-        }
-        if (outdoor_changed) {
-            last_outdoor_change_millis_ = millis();
-        }
-
-        if (sender == MessageSender::Unit && !auto_dry_.is_internal() && zone_count_ <= 4) {
-            bool unit_off = (buffer[1] & 0x2) == 0;
-            bool drying = (buffer[10] & 0x10) && unit_off;
-            auto_dry_active_.publish_state(drying);
-        }
-        if (zone_count_ == 0) {
-            // Infer zone count from status bits if capabilities/settings haven't reported it yet.
-            uint8_t lower_zones = buffer[5] & 0x78;
-            uint8_t upper_zones = buffer[10] & 0x1E;
-            if (upper_zones) {
-                set_zone_count(8);
-            } else if (lower_zones) {
-                set_zone_count(4);
-            }
-        }
-        if (zone_count_ > 0) {
-            set_zone_state(0, buffer[5] & 0x40, true);
-            if (zone_count_ >= 2) {
-                set_zone_state(1, buffer[5] & 0x20, true);
-            }
-            if (zone_count_ >= 3) {
-                set_zone_state(2, buffer[5] & 0x10, true);
-            }
-            if (zone_count_ >= 4) {
-                set_zone_state(3, buffer[5] & 0x8, true);
-            }
-            if (zone_count_ > 4) {
-                set_zone_state(4, buffer[10] & 0x10, true);
-                if (zone_count_ >= 6) {
-                    set_zone_state(5, buffer[10] & 0x8, true);
-                }
-                if (zone_count_ >= 7) {
-                    set_zone_state(6, buffer[10] & 0x4, true);
-                }
-                if (zone_count_ >= 8) {
-                    set_zone_state(7, buffer[10] & 0x2, true);
-                }
-            }
+        // Keep an up-to-date shadow frame for unknown bits even while a local change is pending.
+        // All user-controlled fields are explicitly overlaid when constructing the next send.
+        if (sender != MessageSender::Slave) {
+            memcpy(last_recv_status_, buffer, MsgLen);
         }
 
         bool read_temp = false;
@@ -1218,13 +1413,23 @@ private:
             ESP_LOGD(TAG, "ignoring because pending change");
             return;
         }
-        if (pending_send_ == PendingSendKind::Status) {
+        if (status_write_in_flight_ &&
+            protocol::transaction_active(PendingSendKind::Status, pending_send_,
+                                         pending_echo_retry_kind_)) {
             ESP_LOGD(TAG, "ignoring because pending send");
             return;
         }
 
-        if (sender != MessageSender::Slave) {
-            memcpy(last_recv_status_, buffer, MsgLen);
+        // Zone bits alias unrelated functions on non-zoned and <=4-zone units. Decode them only
+        // after an exact configured/Type-B count is known, and only after the pending-write guard.
+        if (zone_count_ > 0) {
+            protocol::Frame status_frame{};
+            protocol::ZoneStates zone_states{};
+            std::copy(buffer, buffer + MsgLen, status_frame.begin());
+            protocol::decode_status_zones(status_frame, zone_count_, zone_states);
+            for (size_t i = 0; i < zone_count_; ++i) {
+                set_zone_state(i, zone_states[i], true);
+            }
         }
 
         uint8_t b = buffer[1];
@@ -1250,12 +1455,15 @@ private:
                     break;
                 default:
                     ESP_LOGE(TAG, "received invalid operation mode from AC (%u)", mode_val);
-                    *had_error = true;
                     return;
             }
         }
 
         uint8_t fan_val = b >> 5;
+        if (protocol_entities_.fan_mode_code != nullptr) {
+            protocol_entities_.fan_mode_code->publish_state(fan_val);
+        }
+        preserve_extended_fan_mode_ = fan_val >= 5;
         switch (fan_val) {
             case 0:
                 this->fan_mode = climate::CLIMATE_FAN_LOW;
@@ -1272,9 +1480,14 @@ private:
             case 4:
                 this->fan_mode = climate::CLIMATE_FAN_QUIET;
                 break;
+            case 5: // Low-medium has no standard ESPHome enum; show Medium and preserve raw 5.
+                this->fan_mode = climate::CLIMATE_FAN_MEDIUM;
+                break;
+            case 6: // Medium-high has no standard enum; show High and preserve raw 6.
+            case 7: // Power has no standard enum; show High and preserve raw 7.
+                this->fan_mode = climate::CLIMATE_FAN_HIGH;
+                break;
             default:
-                ESP_LOGE(TAG, "received unexpected fan mode from AC (%u)", fan_val);
-                *had_error = true;
                 return;
         }
 
@@ -1283,13 +1496,13 @@ private:
         bool horiz_swing = buffer[2] & 0x40;
         bool vert_swing = buffer[2] & 0x80;
         if (horiz_swing && vert_swing) {
-            set_swing_mode(climate::CLIMATE_SWING_BOTH);
+            set_swing_mode(climate::CLIMATE_SWING_BOTH, true);
         } else if (horiz_swing) {
-            set_swing_mode(climate::CLIMATE_SWING_HORIZONTAL);
+            set_swing_mode(climate::CLIMATE_SWING_HORIZONTAL, true);
         } else if (vert_swing) {
-            set_swing_mode(climate::CLIMATE_SWING_VERTICAL);
+            set_swing_mode(climate::CLIMATE_SWING_VERTICAL, true);
         } else {
-            set_swing_mode(climate::CLIMATE_SWING_OFF);
+            set_swing_mode(climate::CLIMATE_SWING_OFF, true);
         }
 
         float target = float((buffer[6] & 0xf) + 15);
@@ -1303,11 +1516,17 @@ private:
 
         active_reservation_ = buffer[3] & 0x10;
 
-        // Set or clear sleep timer.
-        if (sleep_timer_target_millis_.has_value() && !active_reservation_) {
+        // Set or clear the locally tracked sleep timer without invoking a write callback.
+        if (!active_reservation_) {
+            sleep_timer_target_millis_.reset();
             sleep_timer_.publish_state(0);
         } else if (((buffer[8] >> 3) & 0x7) == 3) {
             uint32_t minutes = (uint32_t(buffer[8] & 0x7) << 8) | buffer[9];
+            if (minutes > 0) {
+                sleep_timer_target_millis_ = millis() + minutes * 60 * 1000;
+            } else {
+                sleep_timer_target_millis_.reset();
+            }
             sleep_timer_.publish_state(minutes);
         }
 
@@ -1331,17 +1550,15 @@ private:
 
             ESPPreferenceObject pref = global_preferences->make_preference<NVSStorage>(this->get_object_id_hash() ^ NVS_STORAGE_VERSION);
             memcpy(nvs_storage_.capabilities_message, buffer, MsgLen);
+            pref.save(&nvs_storage_);
 
-            // If no capabilities were stored in NVS before, restart to make sure we get the correct traits for climate
-            // No restart just on changes (which is unlikely anyway) to make sure we don't end up in a bootloop for faulty devices / communication
+            // Reboot only for the first discovery, but persist later capability changes too.
             if (needsRestart) {
-                pref.save(&nvs_storage_);
                 global_preferences->sync();
                 ESP_LOGD(TAG, "restarting to apply initial capabilities");
                 App.safe_reboot();
-            }
-            else {
-                ESP_LOGD(TAG, "updated device capabilities, manual restart required to take effect");
+            } else {
+                ESP_LOGD(TAG, "updated device capabilities");
             }
         }
 
@@ -1353,69 +1570,67 @@ private:
     }
 
     void process_type_a_settings_message(MessageSender sender, const uint8_t* buffer) {
-        // Send settings the first time we receive a 0xCA message.
         if (sender != MessageSender::Slave) {
-            bool first_time = last_recv_type_a_settings_[0] == 0;
             memcpy(last_recv_type_a_settings_, buffer, MsgLen);
-            if (first_time) {
-                pending_type_a_settings_change_ = true;
+        }
+
+        // Keep every controlled value stable until an in-flight Type-A frame is echoed.
+        if (pending_send_ == PendingSendKind::TypeA ||
+            pending_echo_retry_kind_ == PendingSendKind::TypeA) {
+            return;
+        }
+
+        uint8_t received_vanes[4] = {
+            static_cast<uint8_t>(buffer[7] & 0x0F),
+            static_cast<uint8_t>((buffer[7] >> 4) & 0x0F),
+            static_cast<uint8_t>(buffer[8] & 0x0F),
+            static_cast<uint8_t>((buffer[8] >> 4) & 0x0F),
+        };
+        LgSelect* vane_selects[4] = {
+            &vane_select_1_, &vane_select_2_, &vane_select_3_, &vane_select_4_,
+        };
+        for (size_t i = 0; i < 4; ++i) {
+            if (received_vanes[i] <= 6) {
+                if (!vane_dirty_[i]) {
+                    vane_position_[i] = received_vanes[i];
+                    vane_selects[i]->publish_state(*vane_selects[i]->at(received_vanes[i]));
+                }
+            } else {
+                ESP_LOGE(TAG, "Unexpected vane %u position: %u",
+                         static_cast<unsigned>(i + 1), received_vanes[i]);
             }
         }
 
-        // Handle vane 1 position change
-        uint8_t vane1 = buffer[7] & 0x0F;
-        if (vane1 <= 6) {
-            vane_position_[0] = vane1;
-            vane_select_1_.publish_state(*vane_select_1_.at(vane1));
-        } else {
-            ESP_LOGE(TAG, "Unexpected vane 1 position: %u", vane1);
+        if (!auto_dry_dirty_) {
+            auto_dry_.publish_state(buffer[11] & 0x8);
         }
-
-        // Handle vane 2 position change
-        uint8_t vane2 = (buffer[7] >> 4) & 0x0F;
-        if (vane2 <= 6) {
-            vane_position_[1] = vane2;
-            vane_select_2_.publish_state(*vane_select_2_.at(vane2));
-        } else {
-            ESP_LOGE(TAG, "Unexpected vane 2 position: %u", vane2);
-        }
-
-        // Handle vane 3 position change
-        uint8_t vane3 = buffer[8] & 0x0F;
-        if (vane3 <= 6) {
-            vane_position_[2] = vane3;
-            vane_select_3_.publish_state(*vane_select_3_.at(vane3));
-        } else {
-            ESP_LOGE(TAG, "Unexpected vane 3 position: %u", vane3);
-        }
-
-        // Handle vane 4 position change
-        uint8_t vane4 = (buffer[8] >> 4) & 0x0F;
-        if (vane4 <= 6) {
-            vane_position_[3] = vane4;
-            vane_select_4_.publish_state(*vane_select_4_.at(vane4));
-        } else {
-            ESP_LOGE(TAG, "Unexpected vane 4 position: %u", vane4);
-        }
-
-        auto_dry_.publish_state(buffer[11] & 0x8);
 
         if (sender != MessageSender::Slave) {
-            // Handle fan speed 0 (slow) change
-            fan_speed_[0] = buffer[2];
-            fan_speed_slow_.publish_state(fan_speed_[0]);
+            uint8_t received_fan_speeds[5] = {
+                buffer[2], buffer[3], buffer[4], buffer[5], buffer[6],
+            };
+            LgNumber* fan_speed_entities[5] = {
+                &fan_speed_slow_, &fan_speed_low_, &fan_speed_medium_, &fan_speed_high_,
+                fan_speed_power_,
+            };
+            for (size_t i = 0; i < 5; ++i) {
+                if (!fan_speed_dirty_[i]) {
+                    fan_speed_[i] = received_fan_speeds[i];
+                    if (fan_speed_entities[i] != nullptr) {
+                        fan_speed_entities[i]->publish_state(fan_speed_[i]);
+                    }
+                }
+            }
 
-            // Handle fan speed 1 (low) change
-            fan_speed_[1] = buffer[3];
-            fan_speed_low_.publish_state(fan_speed_[1]);
-
-            // Handle fan speed 2 (medium) change
-            fan_speed_[2] = buffer[4];
-            fan_speed_medium_.publish_state(fan_speed_[2]);
-
-            // Handle fan speed 3 (high) change
-            fan_speed_[3] = buffer[5];
-            fan_speed_high_.publish_state(fan_speed_[3]);
+            uint8_t reported_min = (buffer[10] & 0x0F) + 15;
+            uint8_t reported_max = (buffer[10] >> 4) + 15;
+            if (reported_min >= 15 && reported_max <= 30 && reported_min <= reported_max) {
+                min_setpoint_ = reported_min;
+                max_setpoint_ = reported_max;
+                type_a_limits_known_ = true;
+                supported_traits_.set_visual_min_temperature(min_setpoint_);
+                supported_traits_.set_visual_max_temperature(max_setpoint_);
+            }
         }
     }
 
@@ -1429,35 +1644,94 @@ private:
         }
 
         if (from_unit) {
-            awaiting_initial_type_b_response_ = false;
-
-            // Send installer settings the first time we receive a 0xCB message.
-            bool first_time = last_recv_type_b_settings_[0] == 0;
+            awaiting_type_b_response_ = false;
+            pending_type_b_query_ = false;
+            if (pending_send_ == PendingSendKind::TypeBQuery) {
+                pending_send_ = PendingSendKind::None;
+                send_echo_retry_count_ = 0;
+            }
+            if (pending_echo_retry_kind_ == PendingSendKind::TypeBQuery) {
+                pending_echo_retry_kind_ = PendingSendKind::None;
+                pending_echo_retry_ = false;
+                send_echo_retry_count_ = 0;
+            }
             memcpy(last_recv_type_b_settings_, buffer, MsgLen);
-            if (first_time) {
-                pending_type_b_settings_change_ = true;
+            last_sent_recv_type_b_millis_ = millis();
+        }
+
+        // Type-B byte 10 carries the actual configured count. A fixed YAML count wins; otherwise
+        // accept a valid unit or peer value, bounded by the C9 maximum when known.
+        uint8_t zones = buffer[10] >> 4;
+        if (configured_zone_count_ == 0 && zones >= 1 && zones <= 8) {
+            bool capabilities_known = nvs_storage_.capabilities_message[0] != 0;
+            if (!capabilities_known || (zone_protocol_supported_ && zones <= zone_capacity_)) {
+                set_zone_count(zones);
+            } else {
+                ESP_LOGW(TAG, "Ignoring zone count %u above capability maximum %u", zones,
+                         zone_capacity_);
             }
         }
 
-        last_sent_recv_type_b_millis_ = millis();
-
-        uint8_t overheating = (buffer[2] >> 3) & 0b111;
-        if (overheating <= 4) {
-            overheating_ = overheating;
-            overheating_select_.publish_state(*overheating_select_.at(overheating));
-        } else {
-            ESP_LOGE(TAG, "Unexpected overheating value: %u", overheating);
+        // Peer AB/2B frames are controller-originated requests/settings. Their pipe bytes are
+        // normally zero, so never treat them as unit telemetry.
+        if (!from_unit) {
+            return;
         }
 
-        // Only honor zone count from the peer controller, not from the unit's CB message.
-        if (from_other_controller) {
-            uint8_t zones = buffer[10] >> 4;
-            if (zones >= 2 && zones <= 8) {
-                set_zone_count(zones);
-            } else if (zones == 0) {
-                ESP_LOGD(TAG, "Ignoring zero zone count reported by peer controller");
+        if (protocol_entities_.dred_mode != nullptr) {
+            protocol_entities_.dred_mode->publish_state(buffer[1] & 0x03);
+        }
+        if (protocol_entities_.overcooling_mode != nullptr) {
+            protocol_entities_.overcooling_mode->publish_state((buffer[2] >> 6) & 0x03);
+        }
+        if (protocol_entities_.oil_warning != nullptr) {
+            protocol_entities_.oil_warning->publish_state(buffer[6] & 0x02);
+        }
+        if (protocol_entities_.half_degree_control != nullptr) {
+            protocol_entities_.half_degree_control->publish_state(buffer[6] & 0x04);
+        }
+        if (protocol_entities_.emergency_heater != nullptr) {
+            protocol_entities_.emergency_heater->publish_state(buffer[6] & 0x08);
+        }
+        if (protocol_entities_.emergency_heater_fan != nullptr) {
+            protocol_entities_.emergency_heater_fan->publish_state(buffer[6] & 0x40);
+        }
+        if (protocol_entities_.group_control != nullptr) {
+            protocol_entities_.group_control->publish_state(buffer[6] & 0x80);
+        }
+        if (protocol_entities_.wifi_ap != nullptr) {
+            protocol_entities_.wifi_ap->publish_state(buffer[7] & 0x40);
+        }
+        if (protocol_entities_.outdoor_model != nullptr) {
+            protocol_entities_.outdoor_model->publish_state(buffer[8] & 0x0F);
+        }
+        if (protocol_entities_.indoor_model != nullptr) {
+            protocol_entities_.indoor_model->publish_state(buffer[8] >> 4);
+        }
+        if (protocol_entities_.model_capacity != nullptr) {
+            protocol_entities_.model_capacity->publish_state(buffer[9] & 0x0F);
+        }
+        if (protocol_entities_.refrigerant_leak_detector != nullptr) {
+            protocol_entities_.refrigerant_leak_detector->publish_state(buffer[9] & 0x10);
+        }
+        if (protocol_entities_.thermal_off_fan_mode != nullptr) {
+            protocol_entities_.thermal_off_fan_mode->publish_state((buffer[9] >> 6) & 0x03);
+        }
+        if (protocol_entities_.static_pressure != nullptr) {
+            protocol_entities_.static_pressure->publish_state(buffer[10] & 0x0F);
+        }
+        if (protocol_entities_.low_ambient_heating != nullptr) {
+            protocol_entities_.low_ambient_heating->publish_state(buffer[11] & 0x0F);
+        }
+
+        if (!pending_type_b_settings_change_ && pending_send_ != PendingSendKind::TypeBWrite &&
+            pending_echo_retry_kind_ != PendingSendKind::TypeBWrite) {
+            uint8_t overheating = (buffer[2] >> 3) & 0b111;
+            if (overheating <= 4) {
+                overheating_ = overheating;
+                overheating_select_.publish_state(*overheating_select_.at(overheating));
             } else {
-                ESP_LOGE(TAG, "Unexpected zone count value: %u", zones);
+                ESP_LOGE(TAG, "Unexpected overheating value: %u", overheating);
             }
         }
 
@@ -1487,7 +1761,7 @@ private:
         static_assert(sizeof(PipeTempTable) == 256);
         static_assert(PipeTempTable[UINT8_MAX] == INT8_MIN);
 
-        // Pipe temperatures are only reliable when sent by the unit or peer controllers.
+        // Pipe temperatures are only reliable in the unit's CB response.
         int8_t pipe_temp_in = PipeTempTable[buffer[3]];
         if (pipe_temp_in != INT8_MIN) {
             pipe_temp_in_.publish_state(pipe_temp_in);
@@ -1504,169 +1778,283 @@ private:
         }
     }
 
-    // Main periodic task invoked by ESPHome's scheduler. We consume UART messages, keep the
-    // controller state machine in sync with Home Assistant, and push any pending frames back to
-    // the indoor unit.
-    void update() {
-        ESP_LOGD(TAG, "update");
+    void publish_unsupported_message(const uint8_t* buffer) {
+        if (protocol_entities_.last_unsupported_message != nullptr) {
+            protocol_entities_.last_unsupported_message->publish_state(
+                format_hex_pretty(buffer, MsgLen));
+        }
+    }
 
-        bool had_error = false;
+    void process_type_c_status_message(MessageSender sender, const uint8_t* buffer) {
+        if (sender != MessageSender::Unit) {
+            return;
+        }
+
+        memcpy(last_recv_type_c_status_, buffer, MsgLen);
+        if (!slave_ && respond_to_type_c_) {
+            pending_type_c_response_ = true;
+        }
+
+        if (protocol_entities_.filter_time_remaining != nullptr) {
+            uint16_t hours = buffer[1] | (uint16_t(buffer[2] & 0x0F) << 8);
+            protocol_entities_.filter_time_remaining->publish_state(hours);
+        }
+        if (protocol_entities_.occupancy != nullptr) {
+            protocol_entities_.occupancy->publish_state(buffer[2] & 0x40);
+        }
+        if (protocol_entities_.dual_setpoint != nullptr) {
+            protocol_entities_.dual_setpoint->publish_state(buffer[2] & 0x80);
+        }
+
+        uint32_t energy_tenths = 0;
+        if (protocol_entities_.energy_total != nullptr &&
+            protocol::decode_type4_energy_tenths(buffer + 3, energy_tenths)) {
+            protocol_entities_.energy_total->publish_state(
+                protocol::type4_energy_kwh(energy_tenths));
+        }
+
+        if (protocol_entities_.high_setpoint != nullptr) {
+            float high = (buffer[6] & 0x7F) + ((buffer[8] >> 4) & 0x0F) / 10.0f;
+            protocol_entities_.high_setpoint->publish_state(high);
+        }
+        if (protocol_entities_.low_setpoint != nullptr) {
+            float low = (buffer[7] & 0x7F) + (buffer[8] & 0x0F) / 10.0f;
+            protocol_entities_.low_setpoint->publish_state(low);
+        }
+        if (protocol_entities_.type4_room_temperature != nullptr) {
+            protocol_entities_.type4_room_temperature->publish_state(buffer[9] / 2.0f);
+        }
+        if (protocol_entities_.deadband != nullptr && protocol::is_packed_bcd_byte(buffer[10])) {
+            float deadband = ((buffer[10] >> 4) * 10 + (buffer[10] & 0x0F)) / 10.0f;
+            protocol_entities_.deadband->publish_state(deadband);
+        }
+        if (protocol_entities_.himalaya_cooling != nullptr) {
+            protocol_entities_.himalaya_cooling->publish_state(buffer[11] & 0x01);
+        }
+        if (protocol_entities_.mosquito_away != nullptr) {
+            protocol_entities_.mosquito_away->publish_state(buffer[11] & 0x02);
+        }
+        if (protocol_entities_.comfort_cooling != nullptr) {
+            protocol_entities_.comfort_cooling->publish_state(buffer[11] & 0x04);
+        }
+    }
+
+    bool send_type_c_status_message() {
+        if (last_recv_type_c_status_[0] != 0xCC) {
+            pending_type_c_response_ = false;
+            return false;
+        }
+
+        memcpy(send_buf_, last_recv_type_c_status_, MsgLen);
+        send_buf_[0] = slave_ ? 0x2C : 0xAC;
+        if (auto maybe_temp = get_room_temp()) {
+            send_buf_[9] = uint8_t(std::min(127.5f, std::max(0.0f, *maybe_temp)) * 2);
+        }
+        send_buf_[12] = calc_checksum(send_buf_);
+
+        ESP_LOGD(TAG, "sending %s", format_hex_pretty(send_buf_, MsgLen).c_str());
+        UARTDevice::write_array(send_buf_, MsgLen);
+        pending_type_c_response_ = false;
+        pending_send_ = PendingSendKind::TypeC;
+        pending_send_millis_ = millis();
+        return true;
+    }
+
+    void process_type_e_message(MessageSender sender, const uint8_t* buffer) {
+        if (sender != MessageSender::Unit || buffer[1] != 0x80) {
+            publish_unsupported_message(buffer);
+            return;
+        }
+
+        if (protocol_entities_.humidity != nullptr && buffer[2] <= 100) {
+            protocol_entities_.humidity->publish_state(buffer[2]);
+        }
+        if (protocol_entities_.fan_runtime != nullptr) {
+            protocol_entities_.fan_runtime->publish_state((uint16_t(buffer[3]) << 8) | buffer[4]);
+        }
+        if (protocol_entities_.unit_runtime != nullptr) {
+            protocol_entities_.unit_runtime->publish_state((uint16_t(buffer[6]) << 8) | buffer[7]);
+        }
+        if (protocol_entities_.precise_room_temperature != nullptr && buffer[11] <= 9) {
+            protocol_entities_.precise_room_temperature->publish_state(
+                buffer[10] + buffer[11] / 10.0f);
+        }
+    }
+
+    void process_type_f_message(MessageSender sender, const uint8_t* buffer) {
+        if (sender == MessageSender::Unit && protocol_entities_.type7_power_raw != nullptr) {
+            uint32_t raw = (uint32_t(buffer[2]) << 16) | (uint32_t(buffer[3]) << 8) | buffer[4];
+            protocol_entities_.type7_power_raw->publish_state(raw);
+        }
+        publish_unsupported_message(buffer);
+    }
+
+    // Drain the very slow UART continuously. A rolling parser recovers alignment after noise,
+    // collisions, dropped bytes and the zero padding used during initialization.
+    void loop() override {
+        protocol::Frame frame{};
         while (UARTDevice::available() > 0) {
-            if (!UARTDevice::read_byte(&recv_buf_[recv_buf_len_])) {
+            uint8_t byte = 0;
+            if (!UARTDevice::read_byte(&byte)) {
                 break;
             }
+
             last_recv_millis_ = millis();
-            recv_buf_len_++;
-            if (recv_buf_len_ == MsgLen) {
-                process_message(recv_buf_, &had_error);
-                recv_buf_len_ = 0;
+            last_bus_activity_millis_ = last_recv_millis_;
+            size_t invalid_before = frame_parser_.invalid_candidates();
+            if (frame_parser_.push(byte, frame)) {
+                process_message(frame.data());
+            }
+            if (frame_parser_.invalid_candidates() != invalid_before) {
+                invalid_frame_count_ = frame_parser_.invalid_candidates();
+                ESP_LOGW(TAG, "discarded invalid frame candidate while resynchronizing");
+                if (protocol_entities_.invalid_frames != nullptr) {
+                    protocol_entities_.invalid_frames->publish_state(invalid_frame_count_);
+                }
             }
         }
 
-        // If we did not receive the message we sent last time, try to send it again next time.
-        // Ignore this when we're initializing because the unit then immediately responds by
-        // sending a lot of messages and this introduces a delay.
-        if (pending_send_ != PendingSendKind::None && !is_initializing_) {
-            ESP_LOGE(TAG, "did not receive message we just sent");
-            switch (pending_send_) {
-                case PendingSendKind::Status:
-                    pending_status_change_ = true;
-                    break;
-                case PendingSendKind::TypeA:
-                    pending_type_a_settings_change_ = true;
-                    break;
-                case PendingSendKind::TypeB:
-                    pending_type_b_settings_change_ = true;
-                    break;
-                case PendingSendKind::None:
-                    ESP_LOGE(TAG, "unreachable");
-                    break;
-            }
-            pending_send_ = PendingSendKind::None;
-            return;
+        if (frame_parser_.buffered_size() > 0 && millis() - last_recv_millis_ > 2500) {
+            ESP_LOGW(TAG, "discarding timed-out partial frame (%u bytes)",
+                     static_cast<unsigned>(frame_parser_.buffered_size()));
+            frame_parser_.reset();
         }
+    }
 
-        if (recv_buf_len_ > 0) {
-            if (millis() - last_recv_millis_ > 15 * 1000) {
-                ESP_LOGE(TAG, "discarding incomplete data %s",
-                         format_hex_pretty(recv_buf_, recv_buf_len_).c_str());
-                recv_buf_len_ = 0;
-            }
-            return;
-        }
+    // Periodic non-blocking scheduler for outgoing transactions and timer maintenance.
+    void update() {
+        uint32_t now = millis();
 
-        if (had_error) {
-            return;
-        }
-
-        uint32_t millis_now = millis();
-
-        // Handle sleep timer.
         if (sleep_timer_target_millis_.has_value()) {
-            int32_t diff = int32_t(sleep_timer_target_millis_.value() - millis_now);
+            int32_t diff = int32_t(sleep_timer_target_millis_.value() - now);
             if (diff <= 0) {
                 ESP_LOGD(TAG, "Turning off for sleep timer");
                 sleep_timer_target_millis_.reset();
-                active_reservation_= false;
-                ignore_sleep_timer_callback_ = true;
+                active_reservation_ = false;
                 sleep_timer_.publish_state(0);
-                ignore_sleep_timer_callback_ = false;
                 this->mode = climate::CLIMATE_MODE_OFF;
                 pending_status_change_ = true;
                 publish_state();
             } else if (optional<uint32_t> minutes = get_sleep_timer_minutes()) {
                 if (sleep_timer_.state != *minutes) {
-                    ignore_sleep_timer_callback_ = true;
                     sleep_timer_.publish_state(*minutes);
-                    ignore_sleep_timer_callback_ = false;
                 }
             }
         }
 
-        if (awaiting_initial_type_b_response_ &&
-            millis_now - last_initial_type_b_request_millis_ > 5000) {
-            ESP_LOGW(TAG, "retrying initial AB request");
-            awaiting_initial_type_b_response_ = false;
-            pending_initial_type_b_request_ = true;
-        }
+        // A full echoed frame takes about 1.25 seconds at 104 baud. Wait three seconds before
+        // classifying a send as collided/missing, then retry the same transaction kind.
+        if (pending_send_ != PendingSendKind::None) {
+            if (now - pending_send_millis_ <= 3000) {
+                return;
+            }
 
-        if (slave_ && is_initializing_ && !pending_initial_type_b_request_) {
-            ESP_LOGD(TAG, "Not sending, waiting for other controller or unit to send first");
+            bool retry = send_echo_retry_count_ < 2;
+            ESP_LOGW(TAG, retry ? "missing send echo; retrying transaction"
+                                : "missing send echo; retry limit reached");
+            if (retry) {
+                ++send_echo_retry_count_;
+                memcpy(echo_retry_buf_, send_buf_, MsgLen);
+                pending_echo_retry_kind_ = pending_send_;
+                pending_echo_retry_ = true;
+            } else {
+                send_echo_retry_count_ = 0;
+                if (pending_send_ == PendingSendKind::TypeBQuery) {
+                    awaiting_type_b_response_ = false;
+                }
+                if (pending_send_ == PendingSendKind::Status) {
+                    status_write_in_flight_ = false;
+                }
+            }
+            pending_send_ = PendingSendKind::None;
             return;
         }
 
-        // Make sure the RX pin is idle for at least 500 ms to avoid collisions on the bus as much
-        // as possible. If there is still a collision, we'll likely both start sending at
-        // approximately the same time and the message will hopefully be corrupt (and ignored)
-        // anyway. Else the pending_send_/send_buf_ mechanism should catch it and we try again.
-        //
-        // Note: using digital_read is *much* better for this than using UARTDevice because that
-        // interface has significant delays. It has to wait for a full byte to arrive and this
-        // takes about 9-10 ms with our slow baud rate. There are also various buffers and
-        // timeouts before incoming bytes reach us.
-        //
-        // 500 ms might be overkill, but the device usually sends the same message twice with a
-        // short delay (about 200 ms?) between them so let's not send there either to avoid
-        // collisions.
-        auto check_can_send = [&]() -> bool {
-            while (true) {
-                if (UARTDevice::available() > 0 || !rx_pin_.digital_read()) {
-                    ESP_LOGD(TAG, "line busy, not sending yet");
-                    return false;
-                }
-                if (millis() - millis_now > 500) {
-                    return true;
-                }
-                delay(5);
-            }
-        };
+        // A query response timeout applies to startup, user-triggered and periodic refreshes. A
+        // missed periodic response must not leave polling permanently disabled.
+        if (protocol::type_b_response_timed_out(awaiting_type_b_response_, now,
+                                                last_initial_type_b_request_millis_, 10000)) {
+            awaiting_type_b_response_ = false;
+            ESP_LOGW(TAG, "Type-B query timed out");
+        }
 
-        if (pending_initial_type_b_request_) {
-            if (check_can_send()) {
-                send_type_b_settings_message(/* timed = */ true, /* allow_empty = */ true);
-                pending_initial_type_b_request_ = false;
-                awaiting_initial_type_b_response_ = true;
-                last_initial_type_b_request_millis_ = millis();
+        // The standard boot A8 asks for the complete settings batch first. Only if CB is still
+        // absent do we issue a small, bounded number of explicit AB queries. Slaves stay passive.
+        if (!slave_ && initial_status_sent_ && last_recv_type_b_settings_[0] == 0) {
+            uint32_t retry_delay = initial_type_b_request_count_ == 0 ? 30000 : 10000;
+            if (protocol::can_start_bounded_type_b_query(
+                    slave_, pending_type_b_query_, awaiting_type_b_response_,
+                    initial_type_b_request_count_, initial_type_b_retry_count_) &&
+                now - last_initial_type_b_request_millis_ > retry_delay) {
+                pending_type_b_query_ = true;
+                ++initial_type_b_request_count_;
+                last_initial_type_b_request_millis_ = now;
             }
+        }
+
+        if (!transmit_enabled_ || (slave_ && is_initializing_)) {
             return;
         }
-        if (pending_type_a_settings_change_) {
-            if (check_can_send()) {
-                send_type_a_settings_message();
-            }
+
+        bool bus_idle = UARTDevice::available() == 0 && frame_parser_.buffered_size() == 0 &&
+                        rx_pin_.digital_read() && now - last_bus_activity_millis_ >= 500;
+        if (!bus_idle) {
+            return;
+        }
+
+        if (pending_echo_retry_) {
+            memcpy(send_buf_, echo_retry_buf_, MsgLen);
+            ESP_LOGD(TAG, "retrying %s", format_hex_pretty(send_buf_, MsgLen).c_str());
+            UARTDevice::write_array(send_buf_, MsgLen);
+            pending_send_ = pending_echo_retry_kind_;
+            pending_send_millis_ = millis();
+            pending_echo_retry_kind_ = PendingSendKind::None;
+            pending_echo_retry_ = false;
+            return;
+        }
+
+        // Explicit user changes always outrank telemetry replies and periodic refreshes.
+        if (pending_status_change_) {
+            send_status_message();
+            return;
+        }
+        if (pending_type_a_settings_change_ && last_recv_type_a_settings_[0] != 0) {
+            send_type_a_settings_message();
             return;
         }
         if (pending_type_b_settings_change_) {
-            if (check_can_send()) {
-                send_type_b_settings_message(/* timed = */ false);
+            if (last_recv_type_b_settings_[0] != 0) {
+                send_type_b_settings_message(/* query = */ false);
+                return;
             }
+            // A user change before the first CB may request the missing shadow, but it shares the
+            // configured startup-attempt budget and can never create an unbounded query loop.
+            if (protocol::can_start_bounded_type_b_query(
+                    slave_, pending_type_b_query_, awaiting_type_b_response_,
+                    initial_type_b_request_count_, initial_type_b_retry_count_)) {
+                pending_type_b_query_ = true;
+                ++initial_type_b_request_count_;
+            }
+        }
+        if (pending_type_c_response_) {
+            send_type_c_status_message();
             return;
         }
-        // Send a status message if there is a pending change.
-        // Additionally, queue a Type A message after sending the status message because some
-        // units set the vane position to the default setting after changing swing mode or
-        // operation mode.
-        if (pending_status_change_) {
-            if (check_can_send()) {
-                send_status_message();
-                pending_type_a_settings_change_ = true;
-            }
+        if (pending_type_b_query_ && !slave_) {
+            bool allow_empty = last_recv_type_b_settings_[0] == 0;
+            send_type_b_settings_message(/* query = */ true, allow_empty);
             return;
         }
-        // Send an AB/2B message periodically to request pipe temperature values.
-        if (millis_now - last_sent_recv_type_b_millis_ > type_b_refresh_interval_ms_) {
-            if (check_can_send()) {
-                send_type_b_settings_message(/* timed = */ true);
-            }
+
+        if (!slave_ && type_b_refresh_interval_ms_ > 0 && !awaiting_type_b_response_ &&
+            now - last_sent_recv_type_b_millis_ > type_b_refresh_interval_ms_) {
+            pending_type_b_query_ = true;
             return;
         }
-        // Send a status message every 20 seconds.
-        // Slave controllers only send a status message when settings are changed.
-        if (!slave_ && millis_now - last_sent_status_millis_ > 20 * 1000) {
-            if (check_can_send()) {
-                send_status_message();
-            }
-            return;
+
+        // Master status heartbeat. Slave controllers transmit only explicit local changes.
+        if (!slave_ && now - last_sent_status_millis_ > 20000) {
+            send_status_message();
         }
     }
 };

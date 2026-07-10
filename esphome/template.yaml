@@ -14,6 +14,10 @@ substitutions:
   # ESPHome controller and might not work well.
   # If you're connecting a single controller, this should be set to "false".
   is_slave_controller: "false"
+  # Set this to the exact installed zone count (1-8), or 0 to learn it from Type-B data.
+  zone_count: "0"
+  # Seconds between Type-B telemetry refreshes. Set to 0 to disable active polling.
+  type_b_refresh_interval: "600"
 
 # Encryption key for HA. See https://esphome.io/components/api.html.
 api:
