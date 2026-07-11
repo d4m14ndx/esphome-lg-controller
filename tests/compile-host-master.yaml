@@ -1,0 +1,126 @@
+esphome:
+  name: lg-controller-host-master
+
+host:
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../esphome/components
+    components: [lg_controller]
+
+uart:
+  - id: ac_serial
+    # The host UART allow-list does not include the protocol's real 104 baud.
+    # This fixture is compile-only; the ESP32 fixture must retain 104 baud.
+    port: /dev/null
+    baud_rate: 110
+
+sensor:
+  - platform: template
+    id: host_room_temperature
+    internal: true
+    update_interval: never
+
+climate:
+  - platform: lg_controller
+    id: lg_controller_master
+    name: LG Controller Host Master
+    uart_id: ac_serial
+    rx_pin: 0
+    fahrenheit: false
+    is_slave_controller: false
+    temperature_sensor: host_room_temperature
+
+    vane1: {id: master_vane1, internal: true}
+    vane2: {id: master_vane2, internal: true}
+    vane3: {id: master_vane3, internal: true}
+    vane4: {id: master_vane4, internal: true}
+    overheating: {id: master_overheating, internal: true}
+
+    fan_speed_slow: {id: master_fan_slow, internal: true}
+    fan_speed_low: {id: master_fan_low, internal: true}
+    fan_speed_medium: {id: master_fan_medium, internal: true}
+    fan_speed_high: {id: master_fan_high, internal: true}
+    fan_speed_power: {id: master_fan_power, internal: true}
+    sleep_timer: {id: master_sleep_timer, internal: true}
+
+    error_code: {id: master_error_code, internal: true}
+    pipe_temp_in: {id: master_pipe_temp_in, internal: true}
+    pipe_temp_mid: {id: master_pipe_temp_mid, internal: true}
+    pipe_temp_out: {id: master_pipe_temp_out, internal: true}
+
+    defrost: {id: master_defrost, internal: true}
+    preheat: {id: master_preheat, internal: true}
+    outdoor: {id: master_outdoor, internal: true}
+    auto_dry_active: {id: master_auto_dry_active, internal: true}
+
+    purifier: {id: master_purifier, internal: true}
+    internal_thermistor: {id: master_internal_thermistor, internal: true}
+    auto_dry: {id: master_auto_dry, internal: true}
+
+    zone1: {id: master_zone1, internal: true}
+    zone2: {id: master_zone2, internal: true}
+    zone3: {id: master_zone3, internal: true}
+    zone4: {id: master_zone4, internal: true}
+    zone5: {id: master_zone5, internal: true}
+    zone6: {id: master_zone6, internal: true}
+    zone7: {id: master_zone7, internal: true}
+    zone8: {id: master_zone8, internal: true}
+
+    type_b_refresh_interval: 0
+    initial_type_b_retries: 5
+    respond_to_type4: true
+    zone_count: 8
+
+    filter_warning: {id: master_filter_warning, internal: true}
+    energy_saving: {id: master_energy_saving, internal: true}
+    external_ventilation: {id: master_external_ventilation, internal: true}
+    humidifier_active: {id: master_humidifier_active, internal: true}
+    auxiliary_heater_active: {id: master_auxiliary_heater_active, internal: true}
+    swirl_active: {id: master_swirl_active, internal: true}
+    fan_auto_active: {id: master_fan_auto_active, internal: true}
+    robot_clean_active: {id: master_robot_clean_active, internal: true}
+    cooling_active: {id: master_cooling_active, internal: true}
+    heating_active: {id: master_heating_active, internal: true}
+    oil_warning: {id: master_oil_warning, internal: true}
+    half_degree_control: {id: master_half_degree_control, internal: true}
+    emergency_heater: {id: master_emergency_heater, internal: true}
+    emergency_heater_fan: {id: master_emergency_heater_fan, internal: true}
+    group_control: {id: master_group_control, internal: true}
+    wifi_ap: {id: master_wifi_ap, internal: true}
+    refrigerant_leak_detector: {id: master_refrigerant_leak_detector, internal: true}
+    occupancy: {id: master_occupancy, internal: true}
+    dual_setpoint: {id: master_dual_setpoint, internal: true}
+    himalaya_cooling: {id: master_himalaya_cooling, internal: true}
+    mosquito_away: {id: master_mosquito_away, internal: true}
+    comfort_cooling: {id: master_comfort_cooling, internal: true}
+
+    fan_mode_code: {id: master_fan_mode_code, internal: true}
+    dred_mode: {id: master_dred_mode, internal: true}
+    overcooling_mode: {id: master_overcooling_mode, internal: true}
+    outdoor_model: {id: master_outdoor_model, internal: true}
+    indoor_model: {id: master_indoor_model, internal: true}
+    model_capacity: {id: master_model_capacity, internal: true}
+    static_pressure: {id: master_static_pressure, internal: true}
+    thermal_off_fan_mode: {id: master_thermal_off_fan_mode, internal: true}
+    low_ambient_heating: {id: master_low_ambient_heating, internal: true}
+    configured_zone_count: {id: master_configured_zone_count, internal: true}
+    filter_time_remaining: {id: master_filter_time_remaining, internal: true}
+    energy_total: {id: master_energy_total, internal: true}
+    high_setpoint: {id: master_high_setpoint, internal: true}
+    low_setpoint: {id: master_low_setpoint, internal: true}
+    type4_room_temperature: {id: master_type4_room_temperature, internal: true}
+    deadband: {id: master_deadband, internal: true}
+    humidity: {id: master_humidity, internal: true}
+    fan_runtime: {id: master_fan_runtime, internal: true}
+    unit_runtime: {id: master_unit_runtime, internal: true}
+    precise_room_temperature: {id: master_precise_room_temperature, internal: true}
+    type7_power_raw: {id: master_type7_power_raw, internal: true}
+    invalid_frames: {id: master_invalid_frames, internal: true}
+
+    last_unsupported_message:
+      id: master_last_unsupported_message
+      internal: true

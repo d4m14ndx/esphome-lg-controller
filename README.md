@@ -101,6 +101,7 @@ Features currently available in Home Assistant:
 * Target temperature (0.5°C steps).
 * Use of a Home Assistant temperature sensor for room temperature (rounded to nearest 0.5°C). 
 * Fan speed (slow, low, medium, high, auto).
+* Preservation and diagnostic reporting of the protocol-only low-medium, medium-high, and power fan codes received from the unit.
 * Swing mode (off, vertical, horizontal, both).
 * Airflow up/down setting from 0-6 for up to 4 vanes (vane angle, with 0 being default for operation mode).
 * Switch for external vs internal thermistor.
@@ -109,11 +110,28 @@ Features currently available in Home Assistant:
 * Sensors for reporting outdoor unit on/off, defrost, preheat, error code.
 * Sensors for reporting in/mid/out pipe temperatures (if supported by unit).
 * Input field for sleep timer from 0 to 420 minutes (0 turns off the sleep timer).
-* Input fields for fan speed installer setting (to fine-tune fan speeds, 0-255 with 0 being factory default). This is installer setting 3 (ESP Setting) on LG controllers.
-* Zone control for duct units, supporting up to eight zones (if supported by the indoor unit).
+* Input fields for the slow, low, medium, high, and optional power fan curves (0-255, with 0 being the factory default). This is installer setting 3 (ESP Setting) on LG controllers.
+* Optional zone switches for duct units, supporting an exact configured count from one to eight zones.
 * Select option for over heating installer setting from 0-4 (to change over heating behavior in heating mode). This is installer setting 15 (Over Heating) on LG controllers.
 * YAML options for Fahrenheit mode and 'slave' controller mode.
-* Detects & exposes only supported capabilities for the connected indoor unit.
+* Detects & exposes only supported operation/fan/swing modes for the connected indoor unit.
+* Optional receive-only telemetry from Type 0, 3, 4, 6, and 7 messages, including filter and operating flags, model/configuration codes, total energy, dual-setpoint data, humidity, runtime counters, precise room temperature, and the raw Type 7 power field.
+* Optional protocol diagnostics for invalid frame candidates and the last valid but unsupported message.
+
+The extended telemetry and zoning support are based on the reverse-engineered fields in [protocol.md](protocol.md). They are implemented and covered by protocol-level tests, but have not been verified on every LG model. A sensor remaining unavailable can simply mean that the connected unit does not send that message type.
+
+## Reliability and protocol options
+
+The receive path uses a rolling parser: it validates both the source/type header and checksum, discards invalid candidates one byte at a time, and can recover after noise, a collision, or an inserted/dropped byte. UART receive processing runs continuously. Outgoing work uses a non-blocking scheduler and is sent only after at least 500 ms of observed bus idleness; no scheduler callback waits in a delay loop.
+
+The following YAML options tune behavior without exposing undocumented writes:
+
+* `zone_count` is the exact installed zone count from `1` to `8`. The default `0` waits for an exact count in a Type 3 (`0xCB`) settings message. Capability bits are treated only as a maximum and are not used to guess that four or eight zones are installed. `zone1` through `zone8` are optional schema entries, so custom configurations only need to define the switches they use. Commands for an unknown or out-of-range zone are rejected and the entity is restored to its actual state.
+* `type_b_refresh_interval` is the number of seconds between master-controller Type 3 refresh queries. `0` disables periodic polling. Slave controllers do not actively poll Type B.
+* `initial_type_b_retries` bounds the number of fallback `0xAB` queries after the normal startup status request fails to produce `0xCB`. A user installer-setting change made before the first `0xCB` shares the same budget, so it cannot create an unbounded query loop. Set it to `0` to disable those fallback queries.
+* `respond_to_type4` lets a master reply to unit `0xCC` status frames with a mirrored `0xAC` frame. When an external room sensor is available, byte 9 is refreshed before the reply. Set it to `false` if this exchange is not wanted for a particular installation.
+
+Type 5 and incompletely understood Type 6/7 installer controls are deliberately not exposed. Valid unsupported frames can be observed with `last_unsupported_message`, but the controller does not synthesize undocumented setting writes from them.
 
 The LG ThinQ app and wireless remote can still be used to change these settings and other settings. They'll be synchronized with this controller.
 

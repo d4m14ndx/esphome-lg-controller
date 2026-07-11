@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  protocol-and-host-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install ESPHome
+        run: python -m pip install "esphome==2026.6.4"
+
+      - name: Run protocol tests
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -I. \
+            tests/lg_protocol_test.cpp -o /tmp/lg_protocol_test
+          /tmp/lg_protocol_test
+
+      - name: Validate ESPHome fixtures
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          esphome config tests/compile-host-master.yaml
+          esphome config tests/compile-host-slave.yaml
+          esphome config tests/compile-esp32-idf.yaml
+
+      - name: Compile master and slave host fixtures
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          esphome compile tests/compile-host-master.yaml
+          esphome compile tests/compile-host-slave.yaml
+
+      - name: Compile ESP32 ESP-IDF fixture
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: esphome compile tests/compile-esp32-idf.yaml

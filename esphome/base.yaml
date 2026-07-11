@@ -43,7 +43,8 @@ sensor:
 external_components:
   - source:
       type: git
-      url: https://github.com/JanM321/esphome-lg-controller
+      url: https://github.com/d4m14ndx/esphome-lg-controller
+      ref: main
       path: esphome
     components: [lg_controller]
 
@@ -58,21 +59,25 @@ climate:
       allow_other_uses: true
     fahrenheit: ${fahrenheit}
     is_slave_controller: ${is_slave_controller}
+    zone_count: ${zone_count}
+    type_b_refresh_interval: ${type_b_refresh_interval}
+    initial_type_b_retries: 2
+    respond_to_type4: true
     temperature_sensor: temp_sensor
     vane1:
-      name: Airflow 1 Up/Down
+      name: Airflow 1 Up-Down
       id: vane_position_1
       icon: mdi:arrow-up-down
     vane2:
-      name: Airflow 2 Up/Down
+      name: Airflow 2 Up-Down
       id: vane_position_2
       icon: mdi:arrow-up-down
     vane3:
-      name: Airflow 3 Up/Down
+      name: Airflow 3 Up-Down
       id: vane_position_3
       icon: mdi:arrow-up-down
     vane4:
-      name: Airflow 4 Up/Down
+      name: Airflow 4 Up-Down
       id: vane_position_4
       icon: mdi:arrow-up-down
     overheating:
@@ -98,6 +103,11 @@ climate:
       name: Fan Speed High
       id: fan_speed_high
       icon: mdi:fan-speed-3
+      mode: box
+    fan_speed_power:
+      name: Fan Speed Power
+      id: fan_speed_power
+      icon: mdi:fan-plus
       mode: box
     sleep_timer:
       name: "Sleep Timer (minutes)"
@@ -139,6 +149,182 @@ climate:
       name: Auto Dry Active
       id: auto_dry_active
       icon: mdi:fan-clock
+    filter_warning:
+      name: Filter Warning
+      icon: mdi:air-filter
+    energy_saving:
+      name: Energy Saving Active
+      icon: mdi:leaf
+    external_ventilation:
+      name: External Ventilation Active
+      icon: mdi:fan
+    humidifier_active:
+      name: Humidifier Active
+      icon: mdi:air-humidifier
+    auxiliary_heater_active:
+      name: Auxiliary Heater Active
+      icon: mdi:radiator
+    swirl_active:
+      name: Swirl Active
+      icon: mdi:weather-windy
+    fan_auto_active:
+      name: Fan Auto Function Active
+      icon: mdi:fan-auto
+    robot_clean_active:
+      name: Robot Clean Active
+      icon: mdi:robot-vacuum
+    cooling_active:
+      name: Cooling Active
+      icon: mdi:snowflake
+    heating_active:
+      name: Heating Active
+      icon: mdi:fire
+    oil_warning:
+      name: Oil Change Warning
+      icon: mdi:oil
+      entity_category: diagnostic
+    half_degree_control:
+      name: Half Degree Control
+      entity_category: diagnostic
+    emergency_heater:
+      name: Emergency Heater Enabled
+      icon: mdi:radiator
+      entity_category: diagnostic
+    emergency_heater_fan:
+      name: Emergency Heater Fan Enabled
+      icon: mdi:fan
+      entity_category: diagnostic
+    group_control:
+      name: Group Control Enabled
+      entity_category: diagnostic
+    wifi_ap:
+      name: Indoor Unit Wi-Fi AP
+      icon: mdi:wifi-cog
+      entity_category: diagnostic
+    refrigerant_leak_detector:
+      name: Refrigerant Leak Detector Installed
+      icon: mdi:pipe-leak
+      entity_category: diagnostic
+    occupancy:
+      name: Occupancy
+      icon: mdi:account-check
+    dual_setpoint:
+      name: Dual Setpoint Active
+      icon: mdi:thermometer-lines
+    himalaya_cooling:
+      name: Himalaya Cooling Active
+      icon: mdi:snowflake-alert
+    mosquito_away:
+      name: Mosquito Away Active
+      icon: mdi:bug-outline
+    comfort_cooling:
+      name: Comfort Cooling Active
+      icon: mdi:snowflake-thermometer
+    fan_mode_code:
+      name: Protocol Fan Mode Code
+      entity_category: diagnostic
+      accuracy_decimals: 0
+    dred_mode:
+      name: DRED Mode
+      entity_category: diagnostic
+      accuracy_decimals: 0
+    overcooling_mode:
+      name: Over Cooling Setting
+      entity_category: diagnostic
+      accuracy_decimals: 0
+    outdoor_model:
+      name: Outdoor Model Code
+      entity_category: diagnostic
+      accuracy_decimals: 0
+    indoor_model:
+      name: Indoor Model Code
+      entity_category: diagnostic
+      accuracy_decimals: 0
+    model_capacity:
+      name: Model Capacity Code
+      entity_category: diagnostic
+      accuracy_decimals: 0
+    static_pressure:
+      name: Static Pressure Step
+      entity_category: diagnostic
+      accuracy_decimals: 0
+    thermal_off_fan_mode:
+      name: Thermal-Off Fan Mode
+      entity_category: diagnostic
+      accuracy_decimals: 0
+    low_ambient_heating:
+      name: Low-Ambient Heating Setting
+      entity_category: diagnostic
+      accuracy_decimals: 0
+    configured_zone_count:
+      name: Configured Zone Count
+      entity_category: diagnostic
+      accuracy_decimals: 0
+    filter_time_remaining:
+      name: Filter Time Remaining
+      unit_of_measurement: h
+      device_class: duration
+      entity_category: diagnostic
+      accuracy_decimals: 0
+    energy_total:
+      name: Total Energy
+      unit_of_measurement: kWh
+      device_class: energy
+      state_class: total_increasing
+      accuracy_decimals: 1
+    high_setpoint:
+      name: Dual High Setpoint
+      unit_of_measurement: "°C"
+      device_class: temperature
+      accuracy_decimals: 1
+    low_setpoint:
+      name: Dual Low Setpoint
+      unit_of_measurement: "°C"
+      device_class: temperature
+      accuracy_decimals: 1
+    type4_room_temperature:
+      name: Type 4 Room Temperature
+      unit_of_measurement: "°C"
+      device_class: temperature
+      accuracy_decimals: 1
+    deadband:
+      name: Dual Setpoint Deadband
+      unit_of_measurement: "°C"
+      device_class: temperature
+      accuracy_decimals: 1
+    humidity:
+      name: Indoor Humidity
+      unit_of_measurement: "%"
+      device_class: humidity
+      accuracy_decimals: 0
+    fan_runtime:
+      name: Fan Runtime
+      unit_of_measurement: h
+      device_class: duration
+      state_class: total_increasing
+      accuracy_decimals: 0
+    unit_runtime:
+      name: Indoor Unit Runtime
+      unit_of_measurement: h
+      device_class: duration
+      state_class: total_increasing
+      accuracy_decimals: 0
+    precise_room_temperature:
+      name: Precise Room Temperature
+      unit_of_measurement: "°C"
+      device_class: temperature
+      accuracy_decimals: 1
+    type7_power_raw:
+      name: Type 7 Power Raw
+      entity_category: diagnostic
+      accuracy_decimals: 0
+    invalid_frames:
+      name: Invalid Protocol Frames
+      entity_category: diagnostic
+      accuracy_decimals: 0
+    last_unsupported_message:
+      name: Last Unsupported Protocol Message
+      entity_category: diagnostic
     purifier:
       name: Air Purifier
       id: air_purifier
