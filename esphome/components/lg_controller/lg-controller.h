@@ -1,6 +1,24 @@
 #pragma once
 
-#include "esphome.h"
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <string>
+
+#include "esphome/core/application.h"
+#include "esphome/core/component.h"
+#include "esphome/core/gpio.h"
+#include "esphome/core/helpers.h"
+#include "esphome/core/log.h"
+#include "esphome/core/preferences.h"
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/climate/climate.h"
+#include "esphome/components/number/number.h"
+#include "esphome/components/select/select.h"
+#include "esphome/components/sensor/sensor.h"
+#include "esphome/components/switch/switch.h"
+#include "esphome/core/version.h"
 #include "esphome/components/uart/uart.h"
 
 static const char* const TAG = "lg-controller";
@@ -30,6 +48,17 @@ public:
 };
 
 class LgSelect final : public select::Select {
+public:
+    // ESPHome 2026.1 removed the option string from Select state callbacks.
+    template<typename F> void add_on_index_callback(F callback) {
+#if ESPHOME_VERSION_CODE >= VERSION_CODE(2026, 1, 0)
+        this->add_on_state_callback(callback);
+#else
+        this->add_on_state_callback([callback](const std::string&, size_t index) { callback(index); });
+#endif
+    }
+
+private:
     void control(const std::string& value) override {
         if (this->current_option() != value) {
             // Only publish changes locally; installer settings get sent in batches elsewhere.
@@ -509,19 +538,19 @@ public:
         zone_switches_[5] = zone6;
         zone_switches_[6] = zone7;
         zone_switches_[7] = zone8;
-        vane_select_1_.add_on_state_callback([this](std::string v, size_t index) {
+        vane_select_1_.add_on_index_callback([this](size_t index) {
             set_vane_position(1, index);
         });
-        vane_select_2_.add_on_state_callback([this](std::string v, size_t index) {
+        vane_select_2_.add_on_index_callback([this](size_t index) {
             set_vane_position(2, index);
         });
-        vane_select_3_.add_on_state_callback([this](std::string v, size_t index) {
+        vane_select_3_.add_on_index_callback([this](size_t index) {
             set_vane_position(3, index);
         });
-        vane_select_4_.add_on_state_callback([this](std::string v, size_t index) {
+        vane_select_4_.add_on_index_callback([this](size_t index) {
             set_vane_position(4, index);
         });
-        overheating_select_.add_on_state_callback([this](std::string v, size_t index) {
+        overheating_select_.add_on_index_callback([this](size_t index) {
             set_overheating(index);
         });
 
