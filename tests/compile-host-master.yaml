@@ -124,3 +124,61 @@ climate:
     last_unsupported_message:
       id: master_last_unsupported_message
       internal: true
+
+    # Controls and telemetry for the remaining documented protocol fields.
+    capabilities: {id: master_capabilities, internal: true}
+    thermistor_2th_switch: {id: master_thermistor_2th_switch, internal: true}
+    power: {id: master_power, internal: true}
+    zone_type_new: {id: master_zone_type_new, internal: true}
+    auto_addressing: {id: master_auto_addressing, internal: true}
+    humidifier_switch: {id: master_humidifier_switch, internal: true}
+    auxiliary_heater_switch: {id: master_auxiliary_heater_switch, internal: true}
+    swirl_switch: {id: master_swirl_switch, internal: true}
+    ventilation_switch: {id: master_ventilation_switch, internal: true}
+    fan_auto_switch: {id: master_fan_auto_switch, internal: true}
+    energy_saving_switch: {id: master_energy_saving_switch, internal: true}
+    robot_clean_auto_switch: {id: master_robot_clean_auto_switch, internal: true}
+    wifi_ap_switch: {id: master_wifi_ap_switch, internal: true}
+    dual_setpoint_switch: {id: master_dual_setpoint_switch, internal: true}
+    himalaya_cooling_switch: {id: master_himalaya_cooling_switch, internal: true}
+    mosquito_away_switch: {id: master_mosquito_away_switch, internal: true}
+    comfort_cooling_switch: {id: master_comfort_cooling_switch, internal: true}
+    auxiliary_heater_installed_switch: {id: master_auxiliary_heater_installed_switch, internal: true}
+    dry_contact_auto_switch: {id: master_dry_contact_auto_switch, internal: true}
+    zone_state_fixed_switch: {id: master_zone_state_fixed_switch, internal: true}
+    half_degree_control_switch: {id: master_half_degree_control_switch, internal: true}
+    emergency_heater_switch: {id: master_emergency_heater_switch, internal: true}
+    emergency_heater_fan_switch: {id: master_emergency_heater_fan_switch, internal: true}
+    group_control_switch: {id: master_group_control_switch, internal: true}
+    refrigerant_leak_detector_switch: {id: master_refrigerant_leak_detector_switch, internal: true}
+    auto_start_switch: {id: master_auto_start_switch, internal: true}
+    ventilation_fan_interlock_switch: {id: master_ventilation_fan_interlock_switch, internal: true}
+    auxiliary_heater_duct_type_switch: {id: master_auxiliary_heater_duct_type_switch, internal: true}
+    primary_heater_control_switch: {id: master_primary_heater_control_switch, internal: true}
+    fan_continuous_switch: {id: master_fan_continuous_switch, internal: true}
+    temperature_fan_auto_switch: {id: master_temperature_fan_auto_switch, internal: true}
+    outdoor_unit_function_switch: {id: master_outdoor_unit_function_switch, internal: true}
+    elevation_grill_select: {id: master_elevation_grill_select, internal: true}
+    ceiling_height_select: {id: master_ceiling_height_select, internal: true}
+    overcooling_select: {id: master_overcooling_select, internal: true}
+    thermal_off_fan_select: {id: master_thermal_off_fan_select, internal: true}
+    auto_change_temperature_number: {id: master_auto_change_temperature_number, internal: true}
+    unit_address_number: {id: master_unit_address_number, internal: true}
+    min_setpoint_number: {id: master_min_setpoint_number, internal: true}
+    max_setpoint_number: {id: master_max_setpoint_number, internal: true}
+    static_pressure_number: {id: master_static_pressure_number, internal: true}
+    installed_zones_number: {id: master_installed_zones_number, internal: true}
+    low_ambient_heating_number: {id: master_low_ambient_heating_number, internal: true}
+    simple_dry_contact_number: {id: master_simple_dry_contact_number, internal: true}
+    silent_mode_number: {id: master_silent_mode_number, internal: true}
+    defrost_mode_number: {id: master_defrost_mode_number, internal: true}
+    cn_ext_number: {id: master_cn_ext_number, internal: true}
+    on_timer_number: {id: master_on_timer_number, internal: true}
+    off_timer_number: {id: master_off_timer_number, internal: true}
+    dual_setpoint_high_number: {id: master_dual_setpoint_high_number, internal: true}
+    dual_setpoint_low_number: {id: master_dual_setpoint_low_number, internal: true}
+    deadband_number: {id: master_deadband_number, internal: true}
+    filter_reset_button: {id: master_filter_reset_button, internal: true}
+    clear_reservations_button: {id: master_clear_reservations_button, internal: true}
+    test_run_button: {id: master_test_run_button, internal: true}
+    release_delay_button: {id: master_release_delay_button, internal: true}

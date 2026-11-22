@@ -5,7 +5,7 @@ ESPHome installation, GPIO device, serial port or HVAC access is used.
 
 `lg_protocol_test.cpp` exercises the pure protocol layer. Four fixed frames are
 copied from `protocol.md` at `e31f29f`; they are published examples, not captures
-from Damian's installation. Their checksums are deliberately not regenerated.
+from a real installation. Their checksums are deliberately not regenerated.
 
 `lg_controller_test.cpp` includes the production controller unchanged and drives
 its public setup/loop entry points, registered scheduler callback and zone switch
@@ -13,6 +13,10 @@ callbacks. Frames are synthetic examples derived from the documented Type 0/1/3
 tables, with literal checksum bytes. Tests cover capability/count ordering,
 explicit-count precedence, stale telemetry during writes and queued retries,
 newer local commands behind exact retries, and four-zone byte-10 preservation.
+For the optional controls they check the exact frame each message type sends
+(against the `protocol.md` examples where one exists), that settings wait for
+the unit's own message, custom fan modes, one-shot buttons, and that an owned
+reservation switches the unit while a foreign one is only displayed.
 
 `fakes/` supplies only the external ESPHome boundary: queued UART bytes, recorded
 transmissions, manually advanced clock/timers, entity state, preferences and

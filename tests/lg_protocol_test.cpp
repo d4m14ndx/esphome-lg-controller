@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <string>
 #include <vector>
 
 namespace protocol = esphome::lg_controller::protocol;
@@ -318,9 +319,154 @@ void test_type3_zone_count() {
     CHECK(!protocol::encode_type3_zone_count(wrong_type, 4));
 }
 
+void test_field_table_layout() {
+    for (std::size_t i = 0; i < protocol::kFieldCount; ++i) {
+        const protocol::FieldSpec& a = protocol::kFieldSpecs[i];
+        CHECK(a.mask != 0U);
+        CHECK(a.byte >= 1U && a.byte <= 11U);
+        // Type-E settings carry their subtype in byte 1 and their unused filler in byte 2.
+        CHECK(a.frame != protocol::FieldFrame::TypeE || a.byte >= 3U);
+        // No two fields of one message share a bit.
+        for (std::size_t j = i + 1; j < protocol::kFieldCount; ++j) {
+            const protocol::FieldSpec& b = protocol::kFieldSpecs[j];
+            CHECK(a.frame != b.frame || a.byte != b.byte || (a.mask & b.mask) == 0U);
+        }
+        // Zone bits (Type 0 bytes 5 and 10) are owned by the zone encoder.
+        if (a.frame == protocol::FieldFrame::Status) {
+            CHECK(a.byte != 10U);
+            CHECK(a.byte != 5U || (a.mask & 0x78U) == 0U);
+        }
+        // Writing a field changes only its own bits and reads back.
+        protocol::Frame frame{};
+        frame.fill(0xFF);
+        protocol::encode_field(a, frame.data(), 0);
+        CHECK(protocol::decode_field(a, frame.data()) == 0U);
+        CHECK(frame[a.byte] == static_cast<uint8_t>(~a.mask));
+        protocol::encode_field(a, frame.data(), protocol::field_max(a));
+        CHECK(frame[a.byte] == 0xFFU);
+    }
+    CHECK(protocol::field_frame_type(protocol::FieldFrame::TypeD) == 5U);
+    CHECK(protocol::field_max(protocol::field_spec(protocol::Field::StaticPressure)) == 15U);
+
+    uint8_t capabilities[13] = {0xC9};
+    const auto& humidifier = protocol::field_spec(protocol::Field::Humidifier);
+    CHECK(!protocol::field_advertised(humidifier, capabilities));
+    capabilities[2] = 0x04;
+    CHECK(protocol::field_advertised(humidifier, capabilities));
+    // No capability bit is documented for the unit address, so it is never flagged.
+    CHECK(protocol::field_advertised(protocol::field_spec(protocol::Field::UnitAddress), capabilities));
+}
+
+// The first bytes of each installer-setting example in protocol.md, Type 5 and Type 6.
+void test_documented_installer_setting_examples() {
+    struct Example {
+        protocol::Field field;
+        uint8_t value;
+        std::vector<uint8_t> prefix;
+    };
+    const std::vector<Example> examples{
+        {protocol::Field::AuxiliaryHeaterDuctType, 1, {0xAD, 0x04}},
+        {protocol::Field::PrimaryHeaterControl, 1, {0xAD, 0x40}},
+        {protocol::Field::VentilationFanInterlock, 1, {0xAD, 0x02}},
+        {protocol::Field::AutoStart, 1, {0xAD, 0x01}},
+        {protocol::Field::SimpleDryContact, 3, {0xAD, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03}},
+        {protocol::Field::FanContinuous, 1, {0xAE, 0x10, 0x00, 0x00, 0x02}},
+        {protocol::Field::OutdoorUnitFunction, 1, {0xAE, 0x10, 0x00, 0x00, 0x00, 0x10}},
+        {protocol::Field::SilentMode, 2, {0xAE, 0x10, 0x00, 0x02}},
+        {protocol::Field::DefrostMode, 3, {0xAE, 0x10, 0x00, 0x30}},
+        {protocol::Field::TemperatureFanAuto, 1, {0xAE, 0x10, 0x00, 0x00, 0x04}},
+        {protocol::Field::CnExt, 5, {0xAE, 0x10, 0x00, 0x00, 0x50}},
+    };
+    for (const auto& example : examples) {
+        const protocol::FieldSpec& spec = protocol::field_spec(example.field);
+        protocol::Frame expected{};
+        std::copy(example.prefix.begin(), example.prefix.end(), expected.begin());
+        protocol::Frame frame{};
+        frame[0] = static_cast<uint8_t>(0xA8U | protocol::field_frame_type(spec.frame));
+        if (spec.frame == protocol::FieldFrame::TypeE) {
+            frame[1] = protocol::kTypeESettingsSubtype;
+        }
+        protocol::encode_field(spec, frame.data(), example.value);
+        CHECK(frame == expected);
+        CHECK(protocol::decode_field(spec, expected.data()) == example.value);
+    }
+}
+
+void test_reservations() {
+    // protocol.md: simple reservations of one and seven hours.
+    const protocol::Frame one_hour{{0xA8, 0x43, 0x00, 0x10, 0x00, 0x00, 0x03, 0x1D, 0x28, 0x3C}};
+    const protocol::Frame seven_hours{{0xA8, 0x43, 0x00, 0x10, 0x00, 0x00, 0x03, 0x1D, 0x29, 0xA4}};
+    CHECK(protocol::decode_reservation_type(one_hour.data()) == protocol::ReservationType::SimpleTimer);
+    CHECK(protocol::decode_reservation_minutes(one_hour.data()) == 60U);
+    CHECK(protocol::decode_reservation_minutes(seven_hours.data()) == 420U);
+
+    protocol::Frame frame{};
+    frame[8] = 0xC0;  // Settings request and release-delay bits are not reservation data.
+    protocol::encode_reservation(frame.data(), protocol::ReservationType::SimpleTimer, 420);
+    CHECK(frame[8] == (0xC0U | seven_hours[8]));
+    CHECK(frame[9] == seven_hours[9]);
+    protocol::encode_reservation(frame.data(), protocol::ReservationType::TurnOff, 5000);
+    CHECK(protocol::decode_reservation_minutes(frame.data()) == protocol::kMaxReservationMinutes);
+    CHECK(protocol::decode_reservation_type(frame.data()) == protocol::ReservationType::TurnOff);
+}
+
+void test_type4_dual_setpoints() {
+    // 24.5 high, 22.0 low, deadband 2.5.
+    protocol::Frame frame{{0xCC, 0, 0, 0, 0, 0, 24, 0x80 | 22, 0x50, 0, 0x25, 0}};
+    CHECK(protocol::decode_type4_setpoint_tenths(frame.data(), true) == 245U);
+    CHECK(protocol::decode_type4_setpoint_tenths(frame.data(), false) == 220U);
+    uint8_t deadband = 0;
+    CHECK(protocol::decode_type4_deadband_tenths(frame.data(), deadband) && deadband == 25U);
+
+    protocol::encode_type4_setpoint_tenths(frame.data(), false, 195);
+    CHECK(frame[7] == (0x80U | 19U));  // The changed flag in bit 7 is preserved.
+    CHECK(frame[8] == 0x55U);
+    protocol::encode_type4_setpoint_tenths(frame.data(), true, 260);
+    CHECK(frame[6] == 26U && frame[8] == 0x05U);
+    protocol::encode_type4_deadband_tenths(frame.data(), 30);
+    CHECK(frame[10] == 0x30U);
+    frame[10] = 0x2A;
+    CHECK(!protocol::decode_type4_deadband_tenths(frame.data(), deadband));
+}
+
+void test_type7_power_matches_documented_display() {
+    // protocol.md: 12 34 56 => 123.5 kW, 98 76 54 => 987.7 kW, AB CD EF => 1123.5 kW.
+    const protocol::Frame a{{0xCF, 0x00, 0x12, 0x34, 0x56}};
+    const protocol::Frame b{{0xCF, 0x00, 0x98, 0x76, 0x54}};
+    const protocol::Frame c{{0xCF, 0x00, 0xAB, 0xCD, 0xEF}};
+    CHECK(protocol::decode_type7_power_watts(a.data()) == 123456U);
+    CHECK(protocol::decode_type7_power_watts(b.data()) == 987654U);
+    CHECK(protocol::decode_type7_power_watts(c.data()) == 1123455U);
+    CHECK(std::lround(protocol::decode_type7_power_watts(a.data()) / 100.0) == 1235);
+    CHECK(std::lround(protocol::decode_type7_power_watts(b.data()) / 100.0) == 9877);
+    CHECK(std::lround(protocol::decode_type7_power_watts(c.data()) / 100.0) == 11235);
+}
+
+void test_extended_fan_speeds() {
+    uint8_t capabilities[13] = {0xC9};
+    for (uint8_t code = 5; code <= 7; ++code) {
+        const char* name = protocol::extended_fan_name(code);
+        CHECK(protocol::extended_fan_code(name, std::char_traits<char>::length(name)) == code);
+        CHECK(!protocol::supports_extended_fan(capabilities, code));
+    }
+    CHECK(protocol::extended_fan_code("Power!", 6) == 0U);
+    CHECK(protocol::extended_fan_code("Pow", 3) == 0U);
+    capabilities[6] = 0x08;
+    CHECK(protocol::supports_extended_fan(capabilities, 5));
+    CHECK(!protocol::supports_extended_fan(capabilities, 6));
+    capabilities[3] = 0x80;  // Power in heating mode only.
+    CHECK(protocol::supports_extended_fan(capabilities, 7));
+}
+
 }  // namespace
 
 int main() {
+    test_field_table_layout();
+    test_documented_installer_setting_examples();
+    test_reservations();
+    test_type4_dual_setpoints();
+    test_type7_power_matches_documented_display();
+    test_extended_fan_speeds();
     test_documented_frames_keep_original_checksums();
     test_checksum_and_header_validation();
     test_capability_masks();
