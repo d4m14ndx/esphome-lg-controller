@@ -27,6 +27,8 @@ enum class TransactionKind : uint8_t {
     TypeBQuery,
     TypeBWrite,
     TypeC,
+    TypeD,
+    TypeE,
 };
 
 constexpr bool transaction_active(TransactionKind expected, TransactionKind pending,
@@ -319,5 +321,350 @@ inline bool encode_type3_zone_count(Frame& frame, uint8_t zone_count) {
     frame[10] = static_cast<uint8_t>((frame[10] & 0x0FU) | (zone_count << 4U));
     return true;
 }
+
+// ---- Bit-field settings -------------------------------------------------------------------
+//
+// Most documented settings are a plain bit field in one byte of one message type. They are
+// described once here so decoding, encoding and the entity wiring share a single layout.
+
+// Message carrying a field. TypeE is only the installer-settings subtype (byte 1 == 0x10).
+enum class FieldFrame : uint8_t { Status, TypeA, TypeB, TypeC, TypeD, TypeE };
+
+constexpr uint8_t kTypeESettingsSubtype = 0x10;
+
+constexpr uint8_t field_frame_type(FieldFrame frame) {
+    switch (frame) {
+        case FieldFrame::Status: return 0;
+        case FieldFrame::TypeA: return 2;
+        case FieldFrame::TypeB: return 3;
+        case FieldFrame::TypeC: return 4;
+        case FieldFrame::TypeD: return 5;
+        case FieldFrame::TypeE: return 6;
+    }
+    return 0;
+}
+
+enum class Field : uint8_t {
+    // Type 0 status.
+    Humidifier,
+    AuxiliaryHeater,
+    Swirl,
+    ExternalVentilation,
+    FanAuto,
+    ElevationGrill,
+    EnergySaving,
+    CeilingHeight,
+    // Type 2 settings.
+    UnitAddress,
+    AutoChangeTemperature,
+    AuxiliaryHeaterInstalled,
+    MinSetpoint,
+    MaxSetpoint,
+    DryContactAuto,
+    ZoneStateFixed,
+    RobotCleanAuto,
+    // Type 3 settings.
+    Overcooling,
+    HalfDegreeControl,
+    EmergencyHeater,
+    EmergencyHeaterFan,
+    GroupControl,
+    WifiAp,
+    RefrigerantLeakDetector,
+    ThermalOffFan,
+    StaticPressure,
+    ZoneNumber,
+    LowAmbientHeating,
+    // Type 4 status.
+    DualSetpoint,
+    HimalayaCooling,
+    MosquitoAway,
+    ComfortCooling,
+    // Type 5 installer settings.
+    AutoStart,
+    VentilationFanInterlock,
+    AuxiliaryHeaterDuctType,
+    PrimaryHeaterControl,
+    SimpleDryContact,
+    // Type 6 subtype 0x10 installer settings.
+    SilentMode,
+    DefrostMode,
+    FanContinuous,
+    TemperatureFanAuto,
+    CnExt,
+    OutdoorUnitFunction,
+    Count,
+};
+
+constexpr std::size_t kFieldCount = static_cast<std::size_t>(Field::Count);
+
+struct FieldSpec {
+    FieldFrame frame;
+    uint8_t byte;
+    uint8_t mask;
+    uint8_t offset;           // Added to the raw value for numeric entities.
+    uint8_t capability_byte;  // Type-1 byte announcing support; 0 when no bit is documented.
+    uint8_t capability_mask;
+    const char* name;
+};
+
+// Indexed by Field. Masks for the Type 5/6 fields cover only the values shown in protocol.md.
+constexpr std::array<FieldSpec, kFieldCount> kFieldSpecs{{
+    {FieldFrame::Status, 2, 0x08, 0, 2, 0x04, "humidifier"},
+    {FieldFrame::Status, 2, 0x10, 0, 0, 0x00, "auxiliary heater"},
+    {FieldFrame::Status, 2, 0x20, 0, 1, 0x20, "swirl"},
+    {FieldFrame::Status, 3, 0x01, 0, 0, 0x00, "external ventilation"},
+    {FieldFrame::Status, 3, 0x02, 0, 2, 0x01, "fan auto"},
+    {FieldFrame::Status, 3, 0x60, 0, 0, 0x00, "elevation grill"},
+    {FieldFrame::Status, 5, 0x02, 0, 5, 0x01, "energy saving"},
+    {FieldFrame::Status, 6, 0xC0, 0, 4, 0x08, "ceiling height"},
+
+    {FieldFrame::TypeA, 1, 0xFF, 0, 0, 0x00, "unit address"},
+    {FieldFrame::TypeA, 9, 0x07, 0, 5, 0x04, "auto change temperature"},
+    {FieldFrame::TypeA, 9, 0x80, 0, 7, 0x04, "auxiliary heater installed"},
+    {FieldFrame::TypeA, 10, 0x0F, 15, 0, 0x00, "minimum setpoint"},
+    {FieldFrame::TypeA, 10, 0xF0, 15, 0, 0x00, "maximum setpoint"},
+    {FieldFrame::TypeA, 11, 0x01, 0, 0, 0x00, "dry contact auto"},
+    {FieldFrame::TypeA, 11, 0x02, 0, 1, 0x10, "zone state fixed"},
+    {FieldFrame::TypeA, 11, 0x04, 0, 4, 0x40, "robot clean auto"},
+
+    {FieldFrame::TypeB, 2, 0xC0, 0, 9, 0x04, "over cooling"},
+    {FieldFrame::TypeB, 6, 0x04, 0, 8, 0x02, "half degree control"},
+    {FieldFrame::TypeB, 6, 0x08, 0, 8, 0x10, "emergency heater"},
+    {FieldFrame::TypeB, 6, 0x40, 0, 8, 0x10, "emergency heater fan"},
+    {FieldFrame::TypeB, 6, 0x80, 0, 8, 0x20, "group control"},
+    {FieldFrame::TypeB, 7, 0x40, 0, 10, 0x04, "wifi access point"},
+    {FieldFrame::TypeB, 9, 0x10, 0, 9, 0x80, "refrigerant leak detector"},
+    {FieldFrame::TypeB, 9, 0xC0, 0, 10, 0x40, "thermal off fan"},
+    {FieldFrame::TypeB, 10, 0x0F, 0, 10, 0x02, "static pressure step"},
+    {FieldFrame::TypeB, 10, 0xF0, 0, 0, 0x00, "zone number"},
+    {FieldFrame::TypeB, 11, 0x0F, 0, 8, 0x10, "low ambient heating"},
+
+    {FieldFrame::TypeC, 2, 0x80, 0, 0, 0x00, "dual setpoint"},
+    {FieldFrame::TypeC, 11, 0x01, 0, 11, 0x04, "himalaya cooling"},
+    {FieldFrame::TypeC, 11, 0x02, 0, 11, 0x10, "mosquito away"},
+    {FieldFrame::TypeC, 11, 0x04, 0, 11, 0x20, "comfort cooling"},
+
+    {FieldFrame::TypeD, 1, 0x01, 0, 11, 0x01, "indoor unit auto start"},
+    {FieldFrame::TypeD, 1, 0x02, 0, 11, 0x02, "fan interlocked with ventilation"},
+    {FieldFrame::TypeD, 1, 0x04, 0, 7, 0x04, "auxiliary heater duct type"},
+    {FieldFrame::TypeD, 1, 0x40, 0, 10, 0x80, "primary heater control"},
+    {FieldFrame::TypeD, 6, 0x03, 0, 11, 0x80, "simple dry contact"},
+
+    {FieldFrame::TypeE, 3, 0x03, 0, 0, 0x00, "silent mode"},
+    {FieldFrame::TypeE, 3, 0x30, 0, 0, 0x00, "defrost mode"},
+    {FieldFrame::TypeE, 4, 0x02, 0, 0, 0x00, "fan continuous"},
+    {FieldFrame::TypeE, 4, 0x04, 0, 0, 0x00, "temperature based fan auto"},
+    {FieldFrame::TypeE, 4, 0x70, 0, 0, 0x00, "CN_EXT"},
+    {FieldFrame::TypeE, 5, 0x10, 0, 0, 0x00, "outdoor unit function"},
+}};
+
+constexpr const FieldSpec& field_spec(Field field) {
+    return kFieldSpecs[static_cast<std::size_t>(field)];
+}
+
+constexpr uint8_t field_shift(uint8_t mask) {
+    uint8_t shift = 0;
+    while (mask != 0U && (mask & 1U) == 0U) {
+        mask = static_cast<uint8_t>(mask >> 1U);
+        ++shift;
+    }
+    return shift;
+}
+
+// Largest raw value the field can hold.
+constexpr uint8_t field_max(const FieldSpec& spec) {
+    return static_cast<uint8_t>(spec.mask >> field_shift(spec.mask));
+}
+
+constexpr uint8_t decode_field(const FieldSpec& spec, const uint8_t* frame) {
+    return static_cast<uint8_t>((frame[spec.byte] & spec.mask) >> field_shift(spec.mask));
+}
+
+inline void encode_field(const FieldSpec& spec, uint8_t* frame, uint8_t raw) {
+    frame[spec.byte] = static_cast<uint8_t>(
+        (frame[spec.byte] & ~spec.mask) | ((raw << field_shift(spec.mask)) & spec.mask));
+}
+
+// True when the unit's Type-1 message announces the field, or when no bit is documented for it.
+constexpr bool field_advertised(const FieldSpec& spec, const uint8_t* capabilities) {
+    return spec.capability_byte == 0U ||
+           (capabilities[spec.capability_byte] & spec.capability_mask) != 0U;
+}
+
+// ---- Fan speeds without an ESPHome enum ------------------------------------------------------
+
+constexpr const char* extended_fan_name(uint8_t code) {
+    return code == 5U ? "Low-Medium" : code == 6U ? "Medium-High" : code == 7U ? "Power" : nullptr;
+}
+
+constexpr bool supports_extended_fan(const uint8_t* capabilities, uint8_t code) {
+    return code == 5U   ? (capabilities[6] & 0x08U) != 0U
+           : code == 6U ? (capabilities[6] & 0x10U) != 0U
+           : code == 7U ? (capabilities[3] & 0x82U) != 0U  // power, or power in heating mode
+                        : false;
+}
+
+// Returns the Type-0 fan code (5-7) for a custom fan mode name, or 0 when it is not one.
+inline uint8_t extended_fan_code(const char* name, std::size_t length) {
+    for (uint8_t code = 5; code <= 7; ++code) {
+        const char* candidate = extended_fan_name(code);
+        std::size_t candidate_length = 0;
+        while (candidate[candidate_length] != '\0') {
+            ++candidate_length;
+        }
+        if (candidate_length == length && std::equal(name, name + length, candidate)) {
+            return code;
+        }
+    }
+    return 0;
+}
+
+// ---- Reservations (Type 0 bytes 8-9) ---------------------------------------------------------
+
+enum class ReservationType : uint8_t {
+    None = 0,
+    TurnOn = 1,
+    TurnOff = 2,
+    Sleep = 3,
+    ClearAll = 4,
+    SimpleTimer = 5,
+};
+
+constexpr uint16_t kMaxReservationMinutes = 0x7FF;
+
+constexpr ReservationType decode_reservation_type(const uint8_t* frame) {
+    return static_cast<ReservationType>((frame[8] >> 3U) & 0x07U);
+}
+
+constexpr uint16_t decode_reservation_minutes(const uint8_t* frame) {
+    return static_cast<uint16_t>((static_cast<uint16_t>(frame[8] & 0x07U) << 8U) | frame[9]);
+}
+
+// Replaces the type and minutes, keeping the two unrelated high bits of byte 8.
+inline void encode_reservation(uint8_t* frame, ReservationType type, uint16_t minutes) {
+    minutes = std::min(minutes, kMaxReservationMinutes);
+    frame[8] = static_cast<uint8_t>((frame[8] & 0xC0U) | (static_cast<uint8_t>(type) << 3U) |
+                                    ((minutes >> 8U) & 0x07U));
+    frame[9] = static_cast<uint8_t>(minutes & 0xFFU);
+}
+
+// ---- Type 4 dual setpoints -------------------------------------------------------------------
+
+// Setpoints are an integer byte plus a tenths nibble in byte 8; values are tenths of a degree.
+constexpr uint16_t decode_type4_setpoint_tenths(const uint8_t* frame, bool high) {
+    return high ? static_cast<uint16_t>((frame[6] & 0x7FU) * 10U + (frame[8] >> 4U))
+                : static_cast<uint16_t>((frame[7] & 0x7FU) * 10U + (frame[8] & 0x0FU));
+}
+
+inline void encode_type4_setpoint_tenths(uint8_t* frame, bool high, uint16_t tenths) {
+    const uint8_t whole = static_cast<uint8_t>(std::min<uint16_t>(tenths / 10U, 0x7FU));
+    const uint8_t fraction = static_cast<uint8_t>(tenths % 10U);
+    if (high) {
+        frame[6] = static_cast<uint8_t>((frame[6] & 0x80U) | whole);
+        frame[8] = static_cast<uint8_t>((frame[8] & 0x0FU) | (fraction << 4U));
+    } else {
+        frame[7] = static_cast<uint8_t>((frame[7] & 0x80U) | whole);
+        frame[8] = static_cast<uint8_t>((frame[8] & 0xF0U) | fraction);
+    }
+}
+
+// The deadband is one packed-BCD byte in tenths of a degree (0x25 is 2.5).
+inline bool decode_type4_deadband_tenths(const uint8_t* frame, uint8_t& tenths) {
+    if (!is_packed_bcd_byte(frame[10])) {
+        return false;
+    }
+    tenths = static_cast<uint8_t>((frame[10] >> 4U) * 10U + (frame[10] & 0x0FU));
+    return true;
+}
+
+inline void encode_type4_deadband_tenths(uint8_t* frame, uint8_t tenths) {
+    tenths = std::min<uint8_t>(tenths, 99U);
+    frame[10] = static_cast<uint8_t>(((tenths / 10U) << 4U) | (tenths % 10U));
+}
+
+// ---- Type 7 power ----------------------------------------------------------------------------
+
+// The PREMTB100 shows bytes 2-4 as six decimal positions from hundreds of kW down to watts. It
+// does not reject nibbles above nine, so AB CD EF reads as 1123.455 kW. Returns watts.
+constexpr uint32_t decode_type7_power_watts(const uint8_t* frame) {
+    uint32_t watts = 0;
+    for (std::size_t i = 2; i <= 4; ++i) {
+        watts = watts * 10U + (frame[i] >> 4U);
+        watts = watts * 10U + (frame[i] & 0x0FU);
+    }
+    return watts;
+}
+
+// ---- Type 1 capability names -----------------------------------------------------------------
+
+struct CapabilityFlag {
+    uint8_t byte;
+    uint8_t mask;
+    const char* name;
+};
+
+constexpr CapabilityFlag kCapabilityFlags[] = {
+    {1, 0x10, "zone state setting"},
+    {1, 0x20, "swirl"},
+    {1, 0x40, "horizontal swing"},
+    {1, 0x80, "vertical swing"},
+    {2, 0x01, "fan auto"},
+    {2, 0x02, "plasma (air purifier)"},
+    {2, 0x04, "humidifier"},
+    {2, 0x08, "mode auto"},
+    {2, 0x10, "mode AI"},
+    {2, 0x20, "mode heating"},
+    {2, 0x40, "mode fan"},
+    {2, 0x80, "mode dehumidify"},
+    {3, 0x01, "fan speed auto"},
+    {3, 0x02, "fan speed power"},
+    {3, 0x04, "fan speed high"},
+    {3, 0x08, "fan speed medium"},
+    {3, 0x10, "fan speed low"},
+    {3, 0x20, "fan speed slow"},
+    {3, 0x80, "fan speed power in heating mode"},
+    {4, 0x01, "vertical vane control"},
+    {4, 0x02, "ESP value setting"},
+    {4, 0x04, "static pressure setting"},
+    {4, 0x08, "ceiling height setting"},
+    {4, 0x40, "robot clean"},
+    {4, 0x80, "auto clean (auto dry)"},
+    {5, 0x01, "energy saving"},
+    {5, 0x02, "override master/slave setting"},
+    {5, 0x04, "auto change temperature"},
+    {5, 0x20, "whole degrees only"},
+    {5, 0x40, "single vane"},
+    {5, 0x80, "two vanes"},
+    {6, 0x01, "extra airflow option"},
+    {6, 0x08, "fan speed low-medium"},
+    {6, 0x10, "fan speed medium-high"},
+    {6, 0x20, "minimum cooling setpoint 16"},
+    {7, 0x04, "auxiliary heater"},
+    {7, 0x80, "over heating setting"},
+    {8, 0x01, "pipe temperature setting"},
+    {8, 0x02, "centigrade setting (0.5C or 1C)"},
+    {8, 0x08, "5-8 zones"},
+    {8, 0x10, "emergency heater"},
+    {8, 0x20, "group control"},
+    {8, 0x40, "unit information"},
+    {8, 0x80, "clear filter timer"},
+    {9, 0x02, "indoor unit address check"},
+    {9, 0x04, "over cooling setting"},
+    {9, 0x10, "energy usage"},
+    {9, 0x80, "refrigerant leak detector"},
+    {10, 0x01, "DRED"},
+    {10, 0x02, "static pressure step"},
+    {10, 0x04, "indoor unit wifi access point"},
+    {10, 0x40, "fan in cooling thermal off setting"},
+    {10, 0x80, "primary heater control"},
+    {11, 0x01, "indoor unit auto start"},
+    {11, 0x02, "fan interlocked with ventilation"},
+    {11, 0x04, "himalaya cool"},
+    {11, 0x08, "monsoon comfort"},
+    {11, 0x10, "mosquito away"},
+    {11, 0x20, "comfort cooling (hum+e)"},
+    {11, 0x80, "simple dry contact"},
+};
 
 }  // namespace esphome::lg_controller::protocol

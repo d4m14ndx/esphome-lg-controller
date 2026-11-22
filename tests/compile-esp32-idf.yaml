@@ -58,3 +58,61 @@ climate:
     purifier: {id: idf_purifier, internal: true}
     internal_thermistor: {id: idf_internal_thermistor, internal: true}
     auto_dry: {id: idf_auto_dry, internal: true}
+
+    # Controls and telemetry for the remaining documented protocol fields.
+    capabilities: {id: esp32_capabilities, internal: true}
+    thermistor_2th_switch: {id: esp32_thermistor_2th_switch, internal: true}
+    power: {id: esp32_power, internal: true}
+    zone_type_new: {id: esp32_zone_type_new, internal: true}
+    auto_addressing: {id: esp32_auto_addressing, internal: true}
+    humidifier_switch: {id: esp32_humidifier_switch, internal: true}
+    auxiliary_heater_switch: {id: esp32_auxiliary_heater_switch, internal: true}
+    swirl_switch: {id: esp32_swirl_switch, internal: true}
+    ventilation_switch: {id: esp32_ventilation_switch, internal: true}
+    fan_auto_switch: {id: esp32_fan_auto_switch, internal: true}
+    energy_saving_switch: {id: esp32_energy_saving_switch, internal: true}
+    robot_clean_auto_switch: {id: esp32_robot_clean_auto_switch, internal: true}
+    wifi_ap_switch: {id: esp32_wifi_ap_switch, internal: true}
+    dual_setpoint_switch: {id: esp32_dual_setpoint_switch, internal: true}
+    himalaya_cooling_switch: {id: esp32_himalaya_cooling_switch, internal: true}
+    mosquito_away_switch: {id: esp32_mosquito_away_switch, internal: true}
+    comfort_cooling_switch: {id: esp32_comfort_cooling_switch, internal: true}
+    auxiliary_heater_installed_switch: {id: esp32_auxiliary_heater_installed_switch, internal: true}
+    dry_contact_auto_switch: {id: esp32_dry_contact_auto_switch, internal: true}
+    zone_state_fixed_switch: {id: esp32_zone_state_fixed_switch, internal: true}
+    half_degree_control_switch: {id: esp32_half_degree_control_switch, internal: true}
+    emergency_heater_switch: {id: esp32_emergency_heater_switch, internal: true}
+    emergency_heater_fan_switch: {id: esp32_emergency_heater_fan_switch, internal: true}
+    group_control_switch: {id: esp32_group_control_switch, internal: true}
+    refrigerant_leak_detector_switch: {id: esp32_refrigerant_leak_detector_switch, internal: true}
+    auto_start_switch: {id: esp32_auto_start_switch, internal: true}
+    ventilation_fan_interlock_switch: {id: esp32_ventilation_fan_interlock_switch, internal: true}
+    auxiliary_heater_duct_type_switch: {id: esp32_auxiliary_heater_duct_type_switch, internal: true}
+    primary_heater_control_switch: {id: esp32_primary_heater_control_switch, internal: true}
+    fan_continuous_switch: {id: esp32_fan_continuous_switch, internal: true}
+    temperature_fan_auto_switch: {id: esp32_temperature_fan_auto_switch, internal: true}
+    outdoor_unit_function_switch: {id: esp32_outdoor_unit_function_switch, internal: true}
+    elevation_grill_select: {id: esp32_elevation_grill_select, internal: true}
+    ceiling_height_select: {id: esp32_ceiling_height_select, internal: true}
+    overcooling_select: {id: esp32_overcooling_select, internal: true}
+    thermal_off_fan_select: {id: esp32_thermal_off_fan_select, internal: true}
+    auto_change_temperature_number: {id: esp32_auto_change_temperature_number, internal: true}
+    unit_address_number: {id: esp32_unit_address_number, internal: true}
+    min_setpoint_number: {id: esp32_min_setpoint_number, internal: true}
+    max_setpoint_number: {id: esp32_max_setpoint_number, internal: true}
+    static_pressure_number: {id: esp32_static_pressure_number, internal: true}
+    installed_zones_number: {id: esp32_installed_zones_number, internal: true}
+    low_ambient_heating_number: {id: esp32_low_ambient_heating_number, internal: true}
+    simple_dry_contact_number: {id: esp32_simple_dry_contact_number, internal: true}
+    silent_mode_number: {id: esp32_silent_mode_number, internal: true}
+    defrost_mode_number: {id: esp32_defrost_mode_number, internal: true}
+    cn_ext_number: {id: esp32_cn_ext_number, internal: true}
+    on_timer_number: {id: esp32_on_timer_number, internal: true}
+    off_timer_number: {id: esp32_off_timer_number, internal: true}
+    dual_setpoint_high_number: {id: esp32_dual_setpoint_high_number, internal: true}
+    dual_setpoint_low_number: {id: esp32_dual_setpoint_low_number, internal: true}
+    deadband_number: {id: esp32_deadband_number, internal: true}
+    filter_reset_button: {id: esp32_filter_reset_button, internal: true}
+    clear_reservations_button: {id: esp32_clear_reservations_button, internal: true}
+    test_run_button: {id: esp32_test_run_button, internal: true}
+    release_delay_button: {id: esp32_release_delay_button, internal: true}

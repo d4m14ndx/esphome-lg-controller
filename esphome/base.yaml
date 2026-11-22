@@ -45,7 +45,7 @@ external_components:
       type: git
       url: https://github.com/d4m14ndx/esphome-lg-controller
       ref: main
-      path: esphome
+      path: esphome/components
     components: [lg_controller]
 
 climate:
@@ -325,6 +325,233 @@ climate:
     last_unsupported_message:
       name: Last Unsupported Protocol Message
       entity_category: diagnostic
+    power:
+      name: Power
+      unit_of_measurement: kW
+      device_class: power
+      state_class: measurement
+      accuracy_decimals: 3
+    zone_type_new:
+      name: Zone Type New
+      entity_category: diagnostic
+    auto_addressing:
+      name: Auto Addressing
+      entity_category: diagnostic
+    capabilities:
+      name: Capabilities Message
+      entity_category: diagnostic
+
+    # Controls for the remaining documented protocol fields. Whether a unit acts on one depends
+    # on the model: the capabilities it reports are listed in the log at boot. They are disabled
+    # by default, so enable the ones you need in Home Assistant.
+    thermistor_2th_switch:
+      name: "Two Thermistors (2TH)"
+      entity_category: config
+      disabled_by_default: true
+    humidifier_switch:
+      name: Humidifier
+      disabled_by_default: true
+    auxiliary_heater_switch:
+      name: Auxiliary Heater
+      disabled_by_default: true
+    swirl_switch:
+      name: Swirl
+      disabled_by_default: true
+    ventilation_switch:
+      name: External Ventilation
+      disabled_by_default: true
+    fan_auto_switch:
+      name: Fan Auto
+      disabled_by_default: true
+    energy_saving_switch:
+      name: Energy Saving
+      disabled_by_default: true
+    robot_clean_auto_switch:
+      name: Robot Clean Auto
+      disabled_by_default: true
+    wifi_ap_switch:
+      name: Indoor Unit Wifi AP
+      disabled_by_default: true
+    dual_setpoint_switch:
+      name: Dual Setpoint
+      disabled_by_default: true
+    himalaya_cooling_switch:
+      name: Himalaya Cooling
+      disabled_by_default: true
+    mosquito_away_switch:
+      name: Mosquito Away
+      disabled_by_default: true
+    comfort_cooling_switch:
+      name: Comfort Cooling
+      disabled_by_default: true
+    auxiliary_heater_installed_switch:
+      name: Auxiliary Heater Installed
+      entity_category: config
+      disabled_by_default: true
+    dry_contact_auto_switch:
+      name: Dry Contact Auto
+      entity_category: config
+      disabled_by_default: true
+    zone_state_fixed_switch:
+      name: Zone State Fixed
+      entity_category: config
+      disabled_by_default: true
+    half_degree_control_switch:
+      name: Half Degree Control
+      entity_category: config
+      disabled_by_default: true
+    emergency_heater_switch:
+      name: Emergency Heater
+      entity_category: config
+      disabled_by_default: true
+    emergency_heater_fan_switch:
+      name: Emergency Heater Fan
+      entity_category: config
+      disabled_by_default: true
+    group_control_switch:
+      name: Group Control
+      entity_category: config
+      disabled_by_default: true
+    refrigerant_leak_detector_switch:
+      name: Refrigerant Leak Detector Installed
+      entity_category: config
+      disabled_by_default: true
+    auto_start_switch:
+      name: Indoor Unit Auto Start
+      entity_category: config
+      disabled_by_default: true
+    ventilation_fan_interlock_switch:
+      name: Fan Interlocked With Ventilation
+      entity_category: config
+      disabled_by_default: true
+    auxiliary_heater_duct_type_switch:
+      name: Auxiliary Heater Duct Type
+      entity_category: config
+      disabled_by_default: true
+    primary_heater_control_switch:
+      name: Primary Heater Control
+      entity_category: config
+      disabled_by_default: true
+    fan_continuous_switch:
+      name: Fan Continuous
+      entity_category: config
+      disabled_by_default: true
+    temperature_fan_auto_switch:
+      name: Temperature Based Fan Auto
+      entity_category: config
+      disabled_by_default: true
+    outdoor_unit_function_switch:
+      name: Outdoor Unit Function
+      entity_category: config
+      disabled_by_default: true
+    elevation_grill_select:
+      name: Elevation Grill
+      disabled_by_default: true
+    ceiling_height_select:
+      name: Ceiling Height
+      entity_category: config
+      disabled_by_default: true
+    overcooling_select:
+      name: Over Cooling
+      entity_category: config
+      disabled_by_default: true
+    thermal_off_fan_select:
+      name: Fan In Cooling Thermal Off
+      entity_category: config
+      disabled_by_default: true
+    auto_change_temperature_number:
+      name: Auto Change Temperature
+      mode: box
+      disabled_by_default: true
+    unit_address_number:
+      name: Unit Address
+      mode: box
+      entity_category: config
+      disabled_by_default: true
+    min_setpoint_number:
+      name: Minimum Setpoint
+      mode: box
+      unit_of_measurement: "°C"
+      entity_category: config
+      disabled_by_default: true
+    max_setpoint_number:
+      name: Maximum Setpoint
+      mode: box
+      unit_of_measurement: "°C"
+      entity_category: config
+      disabled_by_default: true
+    static_pressure_number:
+      name: Static Pressure Step
+      mode: box
+      entity_category: config
+      disabled_by_default: true
+    installed_zones_number:
+      name: Installed Zones
+      mode: box
+      entity_category: config
+      disabled_by_default: true
+    low_ambient_heating_number:
+      name: Emergency Heater Low Ambient Heating
+      mode: box
+      entity_category: config
+      disabled_by_default: true
+    simple_dry_contact_number:
+      name: Simple Dry Contact
+      mode: box
+      entity_category: config
+      disabled_by_default: true
+    silent_mode_number:
+      name: Silent Mode
+      mode: box
+      entity_category: config
+      disabled_by_default: true
+    defrost_mode_number:
+      name: Defrost Mode
+      mode: box
+      entity_category: config
+      disabled_by_default: true
+    cn_ext_number:
+      name: CN_EXT Setting
+      mode: box
+      entity_category: config
+      disabled_by_default: true
+    on_timer_number:
+      name: "Turn On Timer (minutes)"
+      mode: box
+      disabled_by_default: true
+    off_timer_number:
+      name: "Turn Off Timer (minutes)"
+      mode: box
+      disabled_by_default: true
+    dual_setpoint_high_number:
+      name: Dual Setpoint High
+      mode: box
+      unit_of_measurement: "°C"
+      disabled_by_default: true
+    dual_setpoint_low_number:
+      name: Dual Setpoint Low
+      mode: box
+      unit_of_measurement: "°C"
+      disabled_by_default: true
+    deadband_number:
+      name: Dual Setpoint Deadband
+      mode: box
+      unit_of_measurement: "°C"
+      disabled_by_default: true
+    filter_reset_button:
+      name: Reset Filter Timer
+      disabled_by_default: true
+    clear_reservations_button:
+      name: Clear Reservations
+      disabled_by_default: true
+    test_run_button:
+      name: Test Run
+      entity_category: config
+      disabled_by_default: true
+    release_delay_button:
+      name: Release 3 Minute Delay
+      entity_category: config
+      disabled_by_default: true
     purifier:
       name: Air Purifier
       id: air_purifier

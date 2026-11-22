@@ -5,7 +5,7 @@ Most of these things haven't been tested with an actual AC unit.
 
 NOTE: as explained in the [README](./README.md), this controller actually supports two different protocols. This only documents the more modern protocol that's used by my own AC.
 
-Implementation support is intentionally narrower than the documented bit map. The ESPHome component decodes a number of fields as optional receive-only telemetry, but it only transmits fields whose direction and encoding are sufficiently understood. A field documented below is therefore not automatically an exposed control; see [feature_coverage.md](feature_coverage.md) for the current boundary.
+The ESPHome component has an optional control for every field below that has a documented encoding, and decodes the remaining fields as telemetry where their layout is known. Most of the extended controls have not been tried on a physical unit. See [feature_coverage.md](feature_coverage.md) for the entity names and for what is still missing.
 
 Some information is based on:
 * This post and comments: https://www.instructables.com/Hacking-an-LG-Ducted-Split-for-Home-Automation/
@@ -47,14 +47,14 @@ The current component handles the message types as follows. These statements des
 
 | Protocol type | ESPHome behavior |
 | --- | --- |
-| Type 0 (`...8`) | Read and write the established climate/status subset; optional receive-only operating telemetry. |
-| Type 1 (`...9`) | Read capabilities and use them for climate traits and safe bounds. |
-| Type 2 (`...A`) | Read settings; write fan curves, vanes, and auto-dry only after an explicit local change. |
-| Type 3 (`...B`) | Read settings/telemetry and exact zone count; write overheating or issue bounded master-only queries. |
-| Type 4 (`...C`, called Type C in the code) | Read optional telemetry; optionally mirror a unit `0xCC` as a master `0xAC` reply. |
-| Type 5 (`...D`) | Unsupported apart from optional raw-frame diagnostics; no writes. |
-| Type 6 (`...E`, called Type E in the code) | Decode unit subtype `0x80` as optional telemetry; other subtypes are diagnostic-only. |
-| Type 7 (`...F`, called Type F in the code) | Publish bytes 2-4 as an optional raw diagnostic value; no interpreted controls. |
+| Type 0 (`...8`) | Read and write the climate state, sub functions, reservations, and one-shot requests; optional operating telemetry. |
+| Type 1 (`...9`) | Read capabilities, use them for climate traits and safe bounds, and list them in the log. |
+| Type 2 (`...A`) | Read and write settings after an explicit local change, as a modified copy of the unit's own message. |
+| Type 3 (`...B`) | Read settings/telemetry and exact zone count; write settings or issue bounded master-only queries. |
+| Type 4 (`...C`, called Type C in the code) | Read optional telemetry; write dual-setpoint and sub-function settings; optionally mirror a unit `0xCC` as a master `0xAC` reply. |
+| Type 5 (`...D`, called Type D in the code) | Read and write the installer bits that have an example below. |
+| Type 6 (`...E`, called Type E in the code) | Decode unit subtype `0x80` as optional telemetry; read and write the single-field subtype `0x10` installer settings. |
+| Type 7 (`...F`, called Type F in the code) | Publish bytes 2-4 as power in kW and as a raw value. |
 
 ## Type 0: Status message (0xA8/0xC8/0x28)
 Status messages are used to control all of the basic settings such as operation mode, fan mode, room temperature, etc.
@@ -133,7 +133,9 @@ For example when the controller sets a "simple reservation" to turn on/off after
 ```
 If a wired controller is connected, it looks like the unit makes it the controller's responsibility to implement these timers and turn the unit on/off.
 
-The sleep timer option uses a different reservation type (3) in byte 8. The sleep timer is the only reservation type that the controller keeps sending regularly with the updated number of minutes. Unlike the other reservation types, the sleep timer can't be emulated with Home Assistant automations because some units use an extra-low fan speed and reduce power usage when the sleep timer is on. This is why the ESPHome controller supports sleep timers natively but not any of the other timers.
+The sleep timer option uses a different reservation type (3) in byte 8. The sleep timer is the only reservation type that the controller keeps sending regularly with the updated number of minutes. Unlike the other reservation types, the sleep timer can't be emulated with Home Assistant automations because some units use an extra-low fan speed and reduce power usage when the sleep timer is on.
+
+The ESPHome controller also has optional turn-on and turn-off timers. Setting one sends the reservation type and minutes once; the controller then counts down and switches the unit itself. A reservation or simple timer received from another controller is shown as remaining minutes and left to that controller.
 
 The turn-off/turn-on reservations are set based on the target time, but the controller always converts this to number of minutes relative to the current time.
 
@@ -226,7 +228,7 @@ The AC sends this to the controller when it's powered on to tell it which featur
 ## Type 2: Settings (0xAA/0xCA)
 Type 0xA messages store more advanced settings and are only sent when the AC is powered on or when changing settings.
 
-The optional ESPHome `fan_speed_power` number maps to byte 6, alongside the existing slow/low/medium/high fan-curve settings. These fields are written only after an explicit local change and only after a valid Type 2 shadow frame has been received.
+The optional ESPHome `fan_speed_power` number maps to byte 6, alongside the existing slow/low/medium/high fan-curve settings. All fields in this message are written only after an explicit local change and only after a valid Type 2 shadow frame has been received.
 
 | Byte | Bits | Description |
 | --- | --- | --- |
@@ -310,6 +312,8 @@ The wall controller sends these regularly and apparently some AC units do this t
 
 The ESPHome component accepts these telemetry fields from unit `0xCC` frames. When `respond_to_type4` is enabled (the default), a master queues a mirrored `0xAC` reply after the bus becomes idle and replaces byte 9 with its configured room temperature when one is available. This behavior is implemented from the observed PREMTB100 exchange but is not claimed to be required by every unit; it can be disabled in YAML.
 
+A local change to the dual-setpoint mode, either setpoint, the deadband, or the byte 11 sub functions is sent the same way: the unit's last `0xCC` with the changed fields and the settings-changed bit of byte 7 set. Nothing is sent until the unit has sent a `0xCC`.
+
 | Byte | Bits | Description |
 | --- | --- | --- |
 | 0 | `XXXX_XXXX` | Message type, `0xAC/0xCC/2C` |
@@ -333,7 +337,7 @@ The ESPHome component accepts these telemetry fields from unit `0xCC` frames. Wh
 ## Type 5: Advanced settings (0xAD/0xCD)
 My unit sends this after power on with all zeroes. The wall controller uses it for installer settings.
 
-**Implementation status:** unsupported for control. The examples below do not define a complete, safely writable frame format, so the ESPHome component neither decodes them into settings nor transmits Type 5 frames. A valid received frame can be reported through the optional unsupported-message diagnostic.
+**Implementation status:** the five settings below are read and written as bits 0, 1, 2, and 6 of byte 1 and the low two bits of byte 6. The examples show one setting at a time, so the message is treated as a complete set of settings: a write is the last received Type 5 message with only the changed field replaced, and nothing is sent until one has been received.
 
 ```
 Set 25 (auxiliary heater) to duct-type:          ad 04 ...
@@ -346,7 +350,7 @@ Set 41 (simple dry contact setting) to 3:        ad 00 00 00 00 00 03 00 00 00 0
 ## Type 6: More settings or status information (0xAE/0xCE)
 The format here is a bit different, with the second byte as additional message type (probably because they ran out of message types).
 
-**Implementation status:** only unit `0xCE` subtype `0x80` is decoded, and only as receive-only humidity, runtime, and precise-temperature telemetry. Subtypes `0x00`, `0x10`, `0x11`, and other values remain unsupported/diagnostic because the examples below are incomplete or uncertain. No Type 6 installer-setting writes are generated.
+**Implementation status:** unit `0xCE` subtype `0x80` is decoded as receive-only humidity, runtime, and precise-temperature telemetry. In subtype `0x10`, settings 46, 47, 48, 49, 51, and 52 are read and written; like Type 5, a write is a modified copy of the last received subtype `0x10` message. Settings 56, 57, and 60 share byte 6 and byte 8 in a way the examples do not fully define, so they are not exposed. Subtypes `0x00` and `0x11` remain diagnostic.
 
 ```
 CE.00... => extended capabilities message? unit sends this with available settings
@@ -381,7 +385,7 @@ AE.80.3C.0F.17.00.2A.74.02.00.12.04.13
 ## Type 7: More status information (0xAF/0xCF)
 Used by newer units and controllers. Contains unit's current power usage among other things. Some examples from PREMTB100:
 
-The component currently publishes bytes 2-4 from unit `0xCF` frames as one raw diagnostic integer. It does not label that integer as watts/kilowatts or use the remaining bytes because the engineering conversion and other fields have not been sufficiently verified.
+The six nibbles of bytes 2-4 are decimal digit positions from hundreds of kW down to watts. The PREMTB100 does not reject nibbles above nine, which is why the third example reads 1123.5. The component publishes this value in kW as `power`, and the same bytes as one raw integer. The remaining bytes are not used.
 
 ```
 CF.00.12.34.56.00.00.00.00.00.00.00.3E => 123.5 kW

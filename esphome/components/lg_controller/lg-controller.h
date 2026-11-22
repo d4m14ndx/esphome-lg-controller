@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <initializer_list>
 #include <utility>
+#include <vector>
 
 #include "esphome/core/application.h"
 #include "esphome/core/component.h"
@@ -14,6 +16,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/preferences.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/button/button.h"
 #include "esphome/components/climate/climate.h"
 #include "esphome/components/number/number.h"
 #include "esphome/components/select/select.h"
@@ -75,6 +78,21 @@ class LgSelect final : public select::Select {
             // Only publish changes locally; installer settings get sent in batches elsewhere.
             this->publish_state(value); 
         }
+    }
+};
+
+class LgButton final : public button::Button {
+    std::function<void()> press_handler_{};
+
+    void press_action() override {
+        if (press_handler_) {
+            press_handler_();
+        }
+    }
+
+public:
+    void set_press_handler(std::function<void()> handler) {
+        press_handler_ = std::move(handler);
     }
 };
 
@@ -188,6 +206,18 @@ public:
 constexpr int8_t TempConversion::FahToLGCel[];
 constexpr int8_t TempConversion::LGCelToCelAdjustment[];
 
+// A frame as text ("A8.00.00..."), for logging and diagnostic entities. The buffer lives in the
+// returned object, so `frame_text(frame).text` is valid for the rest of the statement.
+struct FrameText {
+    char text[format_hex_pretty_size(protocol::kFrameSize)];
+};
+
+inline FrameText frame_text(const uint8_t* frame) {
+    FrameText result;
+    format_hex_pretty_to(result.text, frame, protocol::kFrameSize, '.');
+    return result;
+}
+
 class LgController final : public climate::Climate, public uart::UARTDevice, public Component {
     static constexpr size_t MsgLen = protocol::kFrameSize;
 
@@ -270,10 +300,55 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
         sensor::Sensor* unit_runtime = nullptr;
         sensor::Sensor* precise_room_temperature = nullptr;
         sensor::Sensor* type7_power_raw = nullptr;
+        sensor::Sensor* power = nullptr;
         sensor::Sensor* invalid_frames = nullptr;
 
+        binary_sensor::BinarySensor* zone_type_new = nullptr;
+        binary_sensor::BinarySensor* auto_addressing = nullptr;
+
         text_sensor::TextSensor* last_unsupported_message = nullptr;
+        text_sensor::TextSensor* capabilities = nullptr;
     } protocol_entities_;
+
+    // Optional controls for the bit fields described by protocol::kFieldSpecs. `value` follows
+    // the bus unless `dirty`, which marks a local change that has not been transmitted yet.
+    struct FieldState {
+        LgSwitch* sw = nullptr;
+        LgSelect* select = nullptr;
+        LgNumber* number = nullptr;
+        uint8_t value = 0;
+        bool known = false;
+        bool dirty = false;
+    };
+    FieldState fields_[protocol::kFieldCount] = {};
+
+    // Type-4 dual setpoint values in tenths of a degree: high, low, deadband.
+    struct Type4Number {
+        LgNumber* entity = nullptr;
+        uint16_t tenths = 0;
+        bool known = false;
+        bool dirty = false;
+    };
+    Type4Number type4_numbers_[3] = {};
+
+    // Turn-on and turn-off reservations. The unit leaves the timing to the controller that set
+    // one, so only an owned reservation switches the unit; others are shown for information.
+    struct Reservation {
+        LgNumber* entity = nullptr;
+        optional<uint32_t> target_millis{};
+        bool owned = false;
+        bool announce = false;
+    };
+    Reservation on_timer_{};
+    Reservation off_timer_{};
+    bool clear_reservations_pending_ = false;
+
+    // Bits that are set in a single status frame and cleared again in the next one.
+    enum Momentary : uint8_t { FilterReset = 0x01, TestRun = 0x02, ReleaseDelay = 0x04 };
+    uint8_t momentary_pending_ = 0;
+    uint8_t momentary_sent_ = 0;
+
+    LgSwitch* thermistor_2th_ = nullptr;
 
     protocol::FrameParser frame_parser_{};
     uint32_t last_recv_millis_ = 0;
@@ -291,6 +366,12 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
 
     // Last received 0xCC extended status message.
     uint8_t last_recv_type_c_status_[MsgLen] = {};
+
+    // Last received 0xCD/0xAD installer settings message.
+    uint8_t last_recv_type_d_settings_[MsgLen] = {};
+
+    // Last received 0xCE/0xAE installer settings message (subtype 0x10).
+    uint8_t last_recv_type_e_settings_[MsgLen] = {};
 
     uint8_t send_buf_[MsgLen] = {};
     uint32_t last_sent_status_millis_ = 0;
@@ -311,6 +392,9 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
     bool pending_type_b_settings_change_ = false;
     bool pending_type_b_query_ = false;
     bool pending_type_c_response_ = false;
+    bool pending_type_c_write_ = false;
+    bool pending_type_d_write_ = false;
+    bool pending_type_e_write_ = false;
     bool awaiting_type_b_response_ = false;
     bool initial_status_sent_ = false;
     bool transmit_enabled_ = false;
@@ -323,7 +407,8 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
     uint8_t fan_speed_[5] = {0,0,0,0,0};
     bool fan_speed_dirty_[5] = {};
     bool auto_dry_dirty_ = false;
-    bool preserve_extended_fan_mode_ = false;
+    // Fan code 5-7 (low-medium, medium-high, power) currently selected, or 0 for a standard mode.
+    uint8_t extended_fan_code_ = 0;
     uint8_t overheating_ = 0;
     bool zones_on_[8] = {};
     uint8_t zone_count_ = 0;
@@ -471,6 +556,16 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
                 override_fan_modes.insert(climate::CLIMATE_FAN_HIGH);
             supported_traits_.set_supported_fan_modes(override_fan_modes);
 
+            // Low-medium, medium-high and power have no ESPHome enum, so they are offered as
+            // custom fan modes when the unit advertises them.
+            std::vector<const char*> custom_fan_modes;
+            for (uint8_t code = 5; code <= 7; ++code) {
+                if (protocol::supports_extended_fan(nvs_storage_.capabilities_message, code)) {
+                    custom_fan_modes.push_back(protocol::extended_fan_name(code));
+                }
+            }
+            this->set_supported_custom_fan_modes(custom_fan_modes);
+
             climate::ClimateSwingModeMask override_swing_modes;
             override_swing_modes.insert(climate::CLIMATE_SWING_OFF);
             if (parse_capability(LgCapability::VERTICAL_SWING) && parse_capability(LgCapability::HORIZONTAL_SWING))
@@ -499,7 +594,10 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
         // capability bits describe the maximum, not the number actually installed.
         if (configured_zone_count_ > 0) {
             set_zone_count(configured_zone_count_);
-        } else if (!zone_protocol_supported_) {
+        } else if (!zone_protocol_supported_ || zone_count_ > zone_capacity_) {
+            // A later capability frame may contradict a previously learned count.
+            // Invalidate discovery instead of guessing a smaller installed count;
+            // set_zone_count also clears ownership of the overlapping zone bits.
             set_zone_count(0);
         }
     }
@@ -692,6 +790,56 @@ public:
     void set_last_unsupported_message_text_sensor(text_sensor::TextSensor* entity) {
         protocol_entities_.last_unsupported_message = entity;
     }
+    void set_capabilities_text_sensor(text_sensor::TextSensor* entity) { protocol_entities_.capabilities = entity; }
+    void set_power_sensor(sensor::Sensor* entity) { protocol_entities_.power = entity; }
+    void set_zone_type_new_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.zone_type_new = entity; }
+    void set_auto_addressing_binary_sensor(binary_sensor::BinarySensor* entity) { protocol_entities_.auto_addressing = entity; }
+
+    void set_field_switch(protocol::Field field, LgSwitch* entity) {
+        field_state(field).sw = entity;
+        entity->add_on_control_callback([this, field](bool on) { set_field(field, on ? 1 : 0); });
+    }
+    void set_field_select(protocol::Field field, LgSelect* entity) {
+        field_state(field).select = entity;
+        entity->add_on_state_callback([this, field](size_t index) { set_field(field, index); });
+    }
+    void set_field_number(protocol::Field field, LgNumber* entity) {
+        field_state(field).number = entity;
+        entity->add_on_control_callback([this, field](float value) {
+            set_field(field, int(std::lround(value)) - protocol::field_spec(field).offset);
+        });
+    }
+
+    void set_thermistor_2th_switch(LgSwitch* entity) {
+        thermistor_2th_ = entity;
+        entity->add_on_control_callback([this](bool) { pending_status_change_ = true; });
+    }
+
+    void set_on_timer_number(LgNumber* entity) {
+        on_timer_.entity = entity;
+        entity->add_on_control_callback([this](float minutes) { set_reservation(on_timer_, minutes); });
+    }
+    void set_off_timer_number(LgNumber* entity) {
+        off_timer_.entity = entity;
+        entity->add_on_control_callback([this](float minutes) { set_reservation(off_timer_, minutes); });
+    }
+
+    void set_dual_setpoint_high_number(LgNumber* entity) { set_type4_number(0, entity); }
+    void set_dual_setpoint_low_number(LgNumber* entity) { set_type4_number(1, entity); }
+    void set_deadband_number(LgNumber* entity) { set_type4_number(2, entity); }
+
+    void set_filter_reset_button(LgButton* entity) {
+        entity->set_press_handler([this]() { press_momentary(Momentary::FilterReset); });
+    }
+    void set_test_run_button(LgButton* entity) {
+        entity->set_press_handler([this]() { press_momentary(Momentary::TestRun); });
+    }
+    void set_release_delay_button(LgButton* entity) {
+        entity->set_press_handler([this]() { press_momentary(Momentary::ReleaseDelay); });
+    }
+    void set_clear_reservations_button(LgButton* entity) {
+        entity->set_press_handler([this]() { clear_reservations(); });
+    }
 
     float get_setup_priority() const override {
         return esphome::setup_priority::BUS;
@@ -703,9 +851,17 @@ public:
         ESPPreferenceObject pref = global_preferences->make_preference<NVSStorage>(this->get_object_id_hash() ^ NVS_STORAGE_VERSION);
         pref.load(&nvs_storage_);
 
+        // Configure climate traits and entities based on the capabilities message (if available).
+        // This comes first so a custom fan mode can be restored.
+        configure_capabilities();
+
         auto restore = this->restore_state_();
         if (restore.has_value()) {
             restore->apply(this);
+            if (this->has_custom_fan_mode()) {
+                auto name = this->get_custom_fan_mode();
+                extended_fan_code_ = protocol::extended_fan_code(name.c_str(), name.size());
+            }
         } else {
             this->mode = climate::CLIMATE_MODE_OFF;
             this->target_temperature = 20;
@@ -715,11 +871,17 @@ public:
         }
 
         internal_thermistor_.restore_and_set_mode(esphome::switch_::SWITCH_RESTORE_DEFAULT_OFF);
+        if (thermistor_2th_ != nullptr) {
+            thermistor_2th_->restore_and_set_mode(esphome::switch_::SWITCH_RESTORE_DEFAULT_OFF);
+        }
 
         sleep_timer_.publish_state(0);
-
-        // Configure climate traits and entities based on the capabilities message (if available)
-        configure_capabilities();
+        for (Reservation* timer : {&on_timer_, &off_timer_}) {
+            if (timer->entity != nullptr) {
+                timer->entity->publish_state(0);
+            }
+        }
+        publish_capabilities();
 
         while (UARTDevice::available() > 0) {
             uint8_t b;
@@ -734,6 +896,24 @@ public:
         set_timeout("initial_send", 10000, [this]() { transmit_enabled_ = true; });
     }
 
+    void dump_config() override {
+        ESP_LOGCONFIG(TAG, "LG Controller:");
+        ESP_LOGCONFIG(TAG, "  Role: %s", slave_ ? "slave" : "master");
+        ESP_LOGCONFIG(TAG, "  Zone count: %u", zone_count_);
+        const uint8_t* capabilities = nvs_storage_.capabilities_message;
+        if (capabilities[0] == 0) {
+            ESP_LOGCONFIG(TAG, "  Capabilities: not received from the unit yet");
+            return;
+        }
+        ESP_LOGCONFIG(TAG, "  Capabilities: %s", frame_text(capabilities).text);
+        ESP_LOGCONFIG(TAG, "  Unit type code: %u", capabilities[1] & 0x07);
+        for (const auto& flag : protocol::kCapabilityFlags) {
+            if ((capabilities[flag.byte] & flag.mask) != 0) {
+                ESP_LOGCONFIG(TAG, "  Supports %s", flag.name);
+            }
+        }
+    }
+
     // Process changes from HA.
     void control(const climate::ClimateCall &call) override {
         if (call.get_mode().has_value()) {
@@ -745,9 +925,16 @@ public:
         if (call.get_target_temperature().has_value()) {
             this->target_temperature = *call.get_target_temperature();
         }
-        if (call.get_fan_mode().has_value()) {
-            this->fan_mode = *call.get_fan_mode();
-            preserve_extended_fan_mode_ = false;
+        if (call.has_custom_fan_mode()) {
+            auto name = call.get_custom_fan_mode();
+            uint8_t code = protocol::extended_fan_code(name.c_str(), name.size());
+            if (code != 0) {
+                extended_fan_code_ = code;
+                this->set_custom_fan_mode_(protocol::extended_fan_name(code));
+            }
+        } else if (call.get_fan_mode().has_value()) {
+            this->set_fan_mode_(*call.get_fan_mode());
+            extended_fan_code_ = 0;
         }
         if (call.get_swing_mode().has_value()) {
             set_swing_mode(*call.get_swing_mode());
@@ -761,6 +948,319 @@ public:
     }
 
 private:
+    FieldState& field_state(protocol::Field field) {
+        return fields_[static_cast<size_t>(field)];
+    }
+
+    static bool has_entity(const FieldState& state) {
+        return state.sw != nullptr || state.select != nullptr || state.number != nullptr;
+    }
+
+    // Last frame received for the message type that carries a field.
+    const uint8_t* field_shadow(protocol::FieldFrame frame) const {
+        switch (frame) {
+            case protocol::FieldFrame::Status: return last_recv_status_;
+            case protocol::FieldFrame::TypeA: return last_recv_type_a_settings_;
+            case protocol::FieldFrame::TypeB: return last_recv_type_b_settings_;
+            case protocol::FieldFrame::TypeC: return last_recv_type_c_status_;
+            case protocol::FieldFrame::TypeD: return last_recv_type_d_settings_;
+            case protocol::FieldFrame::TypeE: return last_recv_type_e_settings_;
+        }
+        return last_recv_status_;
+    }
+
+    // Local change to a bit-field setting. Queues the message that carries it.
+    void set_field(protocol::Field field, int raw) {
+        const protocol::FieldSpec& spec = protocol::field_spec(field);
+        FieldState& state = field_state(field);
+        if (raw < 0 || raw > protocol::field_max(spec)) {
+            ESP_LOGE(TAG, "Unexpected %s value: %d", spec.name, raw);
+            return;
+        }
+        if (state.known && state.value == raw) {
+            return;
+        }
+        if (nvs_storage_.capabilities_message[0] != 0 &&
+            !protocol::field_advertised(spec, nvs_storage_.capabilities_message)) {
+            ESP_LOGW(TAG, "The unit does not advertise support for %s", spec.name);
+        }
+        ESP_LOGD(TAG, "Setting %s: %d", spec.name, raw);
+        state.value = raw;
+        state.known = true;
+        state.dirty = true;
+        switch (spec.frame) {
+            case protocol::FieldFrame::Status:
+                pending_status_change_ = true;
+                return;
+            case protocol::FieldFrame::TypeA:
+                pending_type_a_settings_change_ = true;
+                break;
+            case protocol::FieldFrame::TypeB:
+                pending_type_b_settings_change_ = true;
+                break;
+            case protocol::FieldFrame::TypeC:
+                pending_type_c_write_ = true;
+                break;
+            case protocol::FieldFrame::TypeD:
+                pending_type_d_write_ = true;
+                break;
+            case protocol::FieldFrame::TypeE:
+                pending_type_e_write_ = true;
+                break;
+        }
+        // Settings messages are sent as a modified copy of the unit's own message.
+        if (field_shadow(spec.frame)[0] == 0) {
+            ESP_LOGW(TAG, "%s is queued until the unit sends that settings message", spec.name);
+        }
+    }
+
+    void publish_field(const protocol::FieldSpec& spec, FieldState& state) {
+        if (state.sw != nullptr) {
+            state.sw->publish_state(state.value != 0);
+        }
+        if (state.select != nullptr) {
+            auto option = state.select->at(state.value);
+            if (option.has_value()) {
+                state.select->publish_state(*option);
+            }
+        }
+        if (state.number != nullptr) {
+            state.number->publish_state(state.value + spec.offset);
+        }
+    }
+
+    // Refresh bit-field settings from a received frame, keeping local changes that have not
+    // been transmitted yet.
+    void update_fields(protocol::FieldFrame frame, const uint8_t* buffer) {
+        for (size_t i = 0; i < protocol::kFieldCount; ++i) {
+            const protocol::FieldSpec& spec = protocol::kFieldSpecs[i];
+            FieldState& state = fields_[i];
+            if (spec.frame != frame || !has_entity(state) || state.dirty) {
+                continue;
+            }
+            uint8_t raw = protocol::decode_field(spec, buffer);
+            if (state.known && state.value == raw) {
+                continue;
+            }
+            state.value = raw;
+            state.known = true;
+            publish_field(spec, state);
+        }
+    }
+
+    // Write the configured settings into an outgoing frame of the given type.
+    void apply_fields(protocol::FieldFrame frame, uint8_t* buffer, bool clear_dirty = true) {
+        for (size_t i = 0; i < protocol::kFieldCount; ++i) {
+            const protocol::FieldSpec& spec = protocol::kFieldSpecs[i];
+            FieldState& state = fields_[i];
+            if (spec.frame != frame || !has_entity(state) || !state.known) {
+                continue;
+            }
+            protocol::encode_field(spec, buffer, state.value);
+            if (clear_dirty) {
+                state.dirty = false;
+            }
+        }
+    }
+
+    void set_type4_number(size_t index, LgNumber* entity) {
+        type4_numbers_[index].entity = entity;
+        entity->add_on_control_callback([this, index](float value) {
+            Type4Number& number = type4_numbers_[index];
+            uint16_t tenths = uint16_t(std::lround(value * 10));
+            if (number.known && number.tenths == tenths) {
+                return;
+            }
+            number.tenths = tenths;
+            number.known = true;
+            number.dirty = true;
+            pending_type_c_write_ = true;
+        });
+    }
+
+    void update_type4_numbers(const uint8_t* buffer) {
+        for (size_t i = 0; i < 3; ++i) {
+            Type4Number& number = type4_numbers_[i];
+            if (number.entity == nullptr || number.dirty) {
+                continue;
+            }
+            if (i < 2) {
+                number.tenths = protocol::decode_type4_setpoint_tenths(buffer, i == 0);
+            } else {
+                uint8_t deadband = 0;
+                if (!protocol::decode_type4_deadband_tenths(buffer, deadband)) {
+                    continue;
+                }
+                number.tenths = deadband;
+            }
+            number.known = true;
+            number.entity->publish_state(number.tenths / 10.0f);
+        }
+    }
+
+    void apply_type4_numbers(uint8_t* buffer) {
+        for (size_t i = 0; i < 3; ++i) {
+            Type4Number& number = type4_numbers_[i];
+            if (number.entity == nullptr || !number.known) {
+                continue;
+            }
+            if (i < 2) {
+                protocol::encode_type4_setpoint_tenths(buffer, i == 0, number.tenths);
+            } else {
+                protocol::encode_type4_deadband_tenths(buffer, uint8_t(number.tenths));
+            }
+            number.dirty = false;
+        }
+    }
+
+    void publish_capabilities() {
+        if (protocol_entities_.capabilities != nullptr && nvs_storage_.capabilities_message[0] != 0) {
+            protocol_entities_.capabilities->publish_state(
+                frame_text(nvs_storage_.capabilities_message).text);
+        }
+    }
+
+    void press_momentary(Momentary flag) {
+        momentary_pending_ |= flag;
+        pending_status_change_ = true;
+    }
+
+    static optional<uint32_t> minutes_remaining(const optional<uint32_t>& target_millis) {
+        if (!target_millis.has_value()) {
+            return {};
+        }
+        int32_t diff = int32_t(target_millis.value() - millis());
+        if (diff <= 0) {
+            return {};
+        }
+        return uint32_t(diff) / 1000 / 60 + 1;
+    }
+
+    // 0 cancels the reservation.
+    void set_reservation(Reservation& timer, float value) {
+        int minutes = int(std::lround(value));
+        if (minutes < 0 || minutes > protocol::kMaxReservationMinutes) {
+            ESP_LOGE(TAG, "Ignoring invalid reservation value: %d minutes", minutes);
+            return;
+        }
+        ESP_LOGD(TAG, "Setting turn-%s reservation: %d minutes", &timer == &on_timer_ ? "on" : "off",
+                 minutes);
+        if (minutes > 0) {
+            timer.target_millis = millis() + unsigned(minutes) * 60 * 1000;
+            timer.owned = true;
+        } else {
+            timer.target_millis.reset();
+            timer.owned = false;
+            active_reservation_ = local_reservation_active();
+        }
+        timer.announce = true;
+        pending_status_change_ = true;
+    }
+
+    bool local_reservation_active() const {
+        return sleep_timer_target_millis_.has_value() || on_timer_.owned || off_timer_.owned;
+    }
+
+    // Show a reservation that another controller set. That controller switches the unit.
+    void learn_reservation(Reservation& timer, uint16_t minutes) {
+        if (timer.entity == nullptr || timer.owned) {
+            return;
+        }
+        if (minutes > 0) {
+            timer.target_millis = millis() + unsigned(minutes) * 60 * 1000;
+        } else {
+            timer.target_millis.reset();
+        }
+        if (timer.entity->state != minutes) {
+            timer.entity->publish_state(minutes);
+        }
+    }
+
+    void clear_reservations() {
+        ESP_LOGD(TAG, "Clearing all reservations");
+        sleep_timer_target_millis_.reset();
+        sleep_timer_.publish_state(0);
+        for (Reservation* timer : {&on_timer_, &off_timer_}) {
+            timer->target_millis.reset();
+            timer->owned = false;
+            timer->announce = false;
+            if (timer->entity != nullptr) {
+                timer->entity->publish_state(0);
+            }
+        }
+        active_reservation_ = false;
+        clear_reservations_pending_ = true;
+        pending_status_change_ = true;
+    }
+
+    // Operation mode the unit last ran in; the status message keeps it while the unit is off.
+    climate::ClimateMode last_operation_mode() const {
+        switch ((last_recv_status_[1] >> 2) & 0b111) {
+            case 1: return climate::CLIMATE_MODE_DRY;
+            case 2: return climate::CLIMATE_MODE_FAN_ONLY;
+            case 3: return climate::CLIMATE_MODE_HEAT_COOL;
+            case 4: return climate::CLIMATE_MODE_HEAT;
+            default: return climate::CLIMATE_MODE_COOL;
+        }
+    }
+
+    // Count down a reservation and, when this controller owns it, switch the unit at the end.
+    void update_reservation(Reservation& timer, bool turn_on, uint32_t now) {
+        if (!timer.target_millis.has_value()) {
+            return;
+        }
+        if (int32_t(timer.target_millis.value() - now) > 0) {
+            optional<uint32_t> minutes = minutes_remaining(timer.target_millis);
+            if (timer.entity != nullptr && minutes.has_value() && timer.entity->state != *minutes) {
+                timer.entity->publish_state(*minutes);
+            }
+            return;
+        }
+        timer.target_millis.reset();
+        if (timer.entity != nullptr) {
+            timer.entity->publish_state(0);
+        }
+        if (!timer.owned) {
+            return;
+        }
+        ESP_LOGD(TAG, "Turning %s for reservation", turn_on ? "on" : "off");
+        timer.owned = false;
+        timer.announce = true;
+        // Like an expired sleep timer, drop the flag even if the unit still mirrors it.
+        active_reservation_ = local_reservation_active();
+        if (!turn_on) {
+            this->mode = climate::CLIMATE_MODE_OFF;
+        } else if (this->mode == climate::CLIMATE_MODE_OFF) {
+            this->mode = last_operation_mode();
+            pending_type_a_settings_change_ = true;
+        }
+        pending_status_change_ = true;
+        publish_state();
+    }
+
+    // Show a fan speed that has no ESPHome enum. Without the matching custom fan mode the
+    // nearest standard speed is displayed; the raw code is kept for outgoing frames either way.
+    void publish_extended_fan(uint8_t code) {
+        const char* name = protocol::extended_fan_name(code);
+        if (this->find_custom_fan_mode_(name) != nullptr) {
+            this->set_custom_fan_mode_(name);
+        } else {
+            this->set_fan_mode_(code == 5 ? climate::CLIMATE_FAN_MEDIUM : climate::CLIMATE_FAN_HIGH);
+        }
+    }
+
+    // Swing bits of Type-0 byte 2 that this unit uses. Until the capabilities are known both are
+    // assumed. A wall controller on a ducted unit was seen setting the vertical bit in every
+    // frame while the unit reported it clear; such a bit is neither shown as a swing mode nor
+    // changed when sending.
+    uint8_t swing_mask() {
+        if (nvs_storage_.capabilities_message[0] == 0) {
+            return 0x40 | 0x80;
+        }
+        return (parse_capability(LgCapability::HORIZONTAL_SWING) ? 0x40 : 0) |
+               (parse_capability(LgCapability::VERTICAL_SWING) ? 0x80 : 0);
+    }
+
     bool validate_zone_control(size_t index) const {
         if (index >= 8) {
             ESP_LOGE(TAG, "Unexpected zone index: %u", static_cast<unsigned>(index));
@@ -974,10 +1474,10 @@ private:
                 break;
         }
         
-        // Preserve protocol-only low-medium, medium-high and power speeds until HA explicitly
-        // selects a standard fan mode. This prevents periodic status frames downgrading them.
-        if (preserve_extended_fan_mode_) {
-            b |= last_recv_status_[1] & 0xE0;
+        // Low-medium, medium-high and power stay selected until HA picks another fan mode, so
+        // periodic status frames do not downgrade them.
+        if (extended_fan_code_ != 0) {
+            b |= extended_fan_code_ << 5;
         } else if (this->fan_mode.has_value()) {
             switch (this->fan_mode.value()) {
                 case climate::CLIMATE_FAN_LOW:
@@ -1007,32 +1507,36 @@ private:
         }
         send_buf_[1] = b;
 
-        // Byte 2: swing mode and purifier/plasma setting. Preserve the other bits.
-        b = last_recv_status_[2] & ~(0x4|0x40|0x80);
+        // Byte 2: swing mode and purifier/plasma setting. Preserve the other bits, including
+        // swing bits the unit does not support.
+        uint8_t swing = swing_mask();
+        b = last_recv_status_[2] & ~(0x4 | swing);
         if (purifier_.state) {
             b |= 0x4;
         }
+        uint8_t swing_bits = 0;
         switch (this->swing_mode) {
             case climate::CLIMATE_SWING_OFF:
                 break;
             case climate::CLIMATE_SWING_HORIZONTAL:
-                b |= 0x40;
+                swing_bits = 0x40;
                 break;
             case climate::CLIMATE_SWING_VERTICAL:
-                b |= 0x80;
+                swing_bits = 0x80;
                 break;
             case climate::CLIMATE_SWING_BOTH:
-                b |= 0x40 | 0x80;
+                swing_bits = 0x40 | 0x80;
                 break;
             default:
                 ESP_LOGE(TAG, "unknown swing mode");
                 break;
         }
-        send_buf_[2] = b;
+        send_buf_[2] = b | (swing_bits & swing);
 
-        // Byte 3.
+        // Byte 3. A reservation this controller owns keeps the flag set until it ends.
+        bool own_reservation = on_timer_.owned || off_timer_.owned;
         send_buf_[3] = last_recv_status_[3];
-        if (active_reservation_) {
+        if (active_reservation_ || own_reservation) {
             send_buf_[3] |= 0x10;
         } else {
             send_buf_[3] &= ~0x10;
@@ -1063,6 +1567,10 @@ private:
         enum ThermistorSetting { Unit = 0, Controller = 1, TwoTH = 2 };
         ThermistorSetting thermistor =
             internal_thermistor_.state ? ThermistorSetting::Unit : ThermistorSetting::Controller;
+        if (thermistor == ThermistorSetting::Controller && thermistor_2th_ != nullptr &&
+            thermistor_2th_->state) {
+            thermistor = ThermistorSetting::TwoTH;
+        }
         float temp;
         if (auto maybe_temp = get_room_temp()) {
             temp = *maybe_temp;
@@ -1079,8 +1587,10 @@ private:
 
         // Preserve reservation data we do not own. Clearing bytes 8-9 while leaving the active
         // reservation flag set can corrupt turn-on/off reservations created by another control.
-        send_buf_[8] = active_reservation_ ? last_recv_status_[8] : 0;
-        send_buf_[9] = active_reservation_ ? last_recv_status_[9] : 0;
+        // Our own turn-on/off reservations are announced once below and not repeated.
+        bool preserve_reservation = active_reservation_ && !own_reservation;
+        send_buf_[8] = preserve_reservation ? last_recv_status_[8] : 0;
+        send_buf_[9] = preserve_reservation ? last_recv_status_[9] : 0;
         send_buf_[10] = last_recv_status_[10];
 
         if (initialization_request) {
@@ -1100,6 +1610,35 @@ private:
             send_buf_[8] |= (*minutes >> 8) & 0b111;
             send_buf_[9] = *minutes & 0xff;
         }
+
+        // One reservation message per status frame; another pending one goes in the next frame.
+        if (!initialization_request) {
+            if (clear_reservations_pending_) {
+                protocol::encode_reservation(send_buf_, protocol::ReservationType::ClearAll, 0);
+                clear_reservations_pending_ = false;
+            } else if (on_timer_.announce) {
+                protocol::encode_reservation(send_buf_, protocol::ReservationType::TurnOn,
+                                             minutes_remaining(on_timer_.target_millis).value_or(0));
+                on_timer_.announce = false;
+            } else if (off_timer_.announce) {
+                protocol::encode_reservation(send_buf_, protocol::ReservationType::TurnOff,
+                                             minutes_remaining(off_timer_.target_millis).value_or(0));
+                off_timer_.announce = false;
+            }
+        }
+
+        // Momentary requests are set for one frame and explicitly cleared in the following one.
+        if (momentary_sent_ & Momentary::FilterReset) send_buf_[2] &= ~0x02;
+        if (momentary_sent_ & Momentary::TestRun) send_buf_[10] &= ~0x01;
+        if (momentary_sent_ & Momentary::ReleaseDelay) send_buf_[8] &= ~0x80;
+        if (momentary_pending_ & Momentary::FilterReset) send_buf_[2] |= 0x02;
+        if (momentary_pending_ & Momentary::TestRun) send_buf_[10] |= 0x01;
+        if (momentary_pending_ & Momentary::ReleaseDelay) send_buf_[8] |= 0x80;
+        momentary_sent_ = momentary_pending_;
+        momentary_pending_ = 0;
+
+        apply_fields(protocol::FieldFrame::Status, send_buf_);
+
         if (zone_count_ > 0) {
             protocol::Frame status_frame{};
             protocol::ZoneStates zone_states{};
@@ -1117,11 +1656,13 @@ private:
         // Byte 12.
         send_buf_[12] = calc_checksum(send_buf_);
 
-        ESP_LOGD(TAG, "sending %s", format_hex_pretty(send_buf_, MsgLen).c_str());
+        ESP_LOGD(TAG, "sending %s", frame_text(send_buf_).text);
         UARTDevice::write_array(send_buf_, MsgLen);
 
         status_write_in_flight_ = pending_status_change_;
-        pending_status_change_ = false;
+        // A reservation that did not fit in this frame needs another changed status frame.
+        pending_status_change_ =
+            clear_reservations_pending_ || on_timer_.announce || off_timer_.announce;
         pending_send_ = PendingSendKind::Status;
         pending_send_millis_ = millis();
         last_sent_status_millis_ = millis();
@@ -1132,7 +1673,7 @@ private:
 
         // If we sent an updated temperature to the AC, update temperature in HA too.
         // Slave controller temperature sensor is ignored.
-        if (!slave_ && thermistor == ThermistorSetting::Controller) {
+        if (!slave_ && thermistor != ThermistorSetting::Unit) {
             float ha_temp = temp;
             if (fahrenheit_) {
                 ha_temp = TempConversion::lgcelsius_to_celsius(ha_temp);
@@ -1177,9 +1718,11 @@ private:
         }
         send_buf_[11] = b;
 
+        apply_fields(protocol::FieldFrame::TypeA, send_buf_);
+
         send_buf_[12] = calc_checksum(send_buf_);
 
-        ESP_LOGD(TAG, "sending %s", format_hex_pretty(send_buf_, MsgLen).c_str());
+        ESP_LOGD(TAG, "sending %s", frame_text(send_buf_).text);
         UARTDevice::write_array(send_buf_, MsgLen);
 
         pending_type_a_settings_change_ = false;
@@ -1207,6 +1750,7 @@ private:
         } else {
             // Copy settings from the CB/AB message we received.
             memcpy(send_buf_, last_recv_type_b_settings_, MsgLen);
+            apply_fields(protocol::FieldFrame::TypeB, send_buf_, /* clear_dirty = */ !query);
         }
         send_buf_[0] = slave_ ? 0x2B : 0xAB;
 
@@ -1227,7 +1771,7 @@ private:
 
         send_buf_[12] = calc_checksum(send_buf_);
 
-        ESP_LOGD(TAG, "sending %s", format_hex_pretty(send_buf_, MsgLen).c_str());
+        ESP_LOGD(TAG, "sending %s", frame_text(send_buf_).text);
         UARTDevice::write_array(send_buf_, MsgLen);
 
         uint32_t now = millis();
@@ -1244,7 +1788,7 @@ private:
     }
 
     void process_message(const uint8_t* buffer) {
-        ESP_LOGD(TAG, "received %s", format_hex_pretty(buffer, MsgLen).c_str());
+        ESP_LOGD(TAG, "received %s", frame_text(buffer).text);
 
         if (pending_send_ != PendingSendKind::None && memcmp(send_buf_, buffer, MsgLen) == 0) {
             ESP_LOGD(TAG, "verified send");
@@ -1295,6 +1839,9 @@ private:
                 break;
             case 4: // 0xCC/AC/2C
                 process_type_c_status_message(*sender, buffer);
+                break;
+            case 5: // 0xCD/AD/2D
+                process_type_d_settings_message(*sender, buffer);
                 break;
             case 6: // 0xCE/AE/2E
                 process_type_e_message(*sender, buffer);
@@ -1377,6 +1924,12 @@ private:
             }
             if (protocol_entities_.heating_active != nullptr) {
                 protocol_entities_.heating_active->publish_state(buffer[7] & 0x80);
+            }
+            if (protocol_entities_.zone_type_new != nullptr) {
+                protocol_entities_.zone_type_new->publish_state(buffer[5] & 0x80);
+            }
+            if (protocol_entities_.auto_addressing != nullptr) {
+                protocol_entities_.auto_addressing->publish_state(buffer[4] & 0x20);
             }
         }
 
@@ -1463,38 +2016,37 @@ private:
         if (protocol_entities_.fan_mode_code != nullptr) {
             protocol_entities_.fan_mode_code->publish_state(fan_val);
         }
-        preserve_extended_fan_mode_ = fan_val >= 5;
+        extended_fan_code_ = fan_val >= 5 ? fan_val : 0;
         switch (fan_val) {
             case 0:
-                this->fan_mode = climate::CLIMATE_FAN_LOW;
+                this->set_fan_mode_(climate::CLIMATE_FAN_LOW);
                 break;
             case 1:
-                this->fan_mode = climate::CLIMATE_FAN_MEDIUM;
+                this->set_fan_mode_(climate::CLIMATE_FAN_MEDIUM);
                 break;
             case 2:
-                this->fan_mode = climate::CLIMATE_FAN_HIGH;
+                this->set_fan_mode_(climate::CLIMATE_FAN_HIGH);
                 break;
             case 3:
-                this->fan_mode = climate::CLIMATE_FAN_AUTO;
+                this->set_fan_mode_(climate::CLIMATE_FAN_AUTO);
                 break;
             case 4:
-                this->fan_mode = climate::CLIMATE_FAN_QUIET;
+                this->set_fan_mode_(climate::CLIMATE_FAN_QUIET);
                 break;
-            case 5: // Low-medium has no standard ESPHome enum; show Medium and preserve raw 5.
-                this->fan_mode = climate::CLIMATE_FAN_MEDIUM;
-                break;
-            case 6: // Medium-high has no standard enum; show High and preserve raw 6.
-            case 7: // Power has no standard enum; show High and preserve raw 7.
-                this->fan_mode = climate::CLIMATE_FAN_HIGH;
+            case 5: // Low-medium
+            case 6: // Medium-high
+            case 7: // Power
+                publish_extended_fan(fan_val);
                 break;
             default:
                 return;
         }
 
         purifier_.publish_state(buffer[2] & 0x4);
+        update_fields(protocol::FieldFrame::Status, buffer);
 
-        bool horiz_swing = buffer[2] & 0x40;
-        bool vert_swing = buffer[2] & 0x80;
+        bool horiz_swing = buffer[2] & swing_mask() & 0x40;
+        bool vert_swing = buffer[2] & swing_mask() & 0x80;
         if (horiz_swing && vert_swing) {
             set_swing_mode(climate::CLIMATE_SWING_BOTH, true);
         } else if (horiz_swing) {
@@ -1515,6 +2067,21 @@ private:
         this->target_temperature = target;
 
         active_reservation_ = buffer[3] & 0x10;
+
+        // Reservations set by another controller are tracked for display only.
+        protocol::ReservationType reservation = protocol::decode_reservation_type(buffer);
+        uint16_t reservation_minutes = protocol::decode_reservation_minutes(buffer);
+        if (!active_reservation_ || reservation == protocol::ReservationType::ClearAll) {
+            learn_reservation(on_timer_, 0);
+            learn_reservation(off_timer_, 0);
+        } else if (reservation == protocol::ReservationType::TurnOn) {
+            learn_reservation(on_timer_, reservation_minutes);
+        } else if (reservation == protocol::ReservationType::TurnOff) {
+            learn_reservation(off_timer_, reservation_minutes);
+        } else if (reservation == protocol::ReservationType::SimpleTimer) {
+            // The simple timer toggles power after the given time.
+            learn_reservation((buffer[1] & 0x2) ? off_timer_ : on_timer_, reservation_minutes);
+        }
 
         // Set or clear the locally tracked sleep timer without invoking a write callback.
         if (!active_reservation_) {
@@ -1565,6 +2132,7 @@ private:
         // Apply newly received capabilities immediately so zone entities become available without
         // requiring a restart.
         configure_capabilities();
+        publish_capabilities();
 
         is_initializing_ = false;
     }
@@ -1631,6 +2199,8 @@ private:
                 supported_traits_.set_visual_min_temperature(min_setpoint_);
                 supported_traits_.set_visual_max_temperature(max_setpoint_);
             }
+
+            update_fields(protocol::FieldFrame::TypeA, buffer);
         }
     }
 
@@ -1733,6 +2303,7 @@ private:
             } else {
                 ESP_LOGE(TAG, "Unexpected overheating value: %u", overheating);
             }
+            update_fields(protocol::FieldFrame::TypeB, buffer);
         }
 
         // Table mapping a byte value to degrees Celsius based on values displayed by PREMTB100.
@@ -1781,7 +2352,7 @@ private:
     void publish_unsupported_message(const uint8_t* buffer) {
         if (protocol_entities_.last_unsupported_message != nullptr) {
             protocol_entities_.last_unsupported_message->publish_state(
-                format_hex_pretty(buffer, MsgLen));
+                frame_text(buffer).text);
         }
     }
 
@@ -1793,6 +2364,12 @@ private:
         memcpy(last_recv_type_c_status_, buffer, MsgLen);
         if (!slave_ && respond_to_type_c_) {
             pending_type_c_response_ = true;
+        }
+
+        if (!pending_type_c_write_ && pending_send_ != PendingSendKind::TypeC &&
+            pending_echo_retry_kind_ != PendingSendKind::TypeC) {
+            update_fields(protocol::FieldFrame::TypeC, buffer);
+            update_type4_numbers(buffer);
         }
 
         if (protocol_entities_.filter_time_remaining != nullptr) {
@@ -1839,6 +2416,7 @@ private:
         }
     }
 
+    // Mirror the unit's Type-C status back, carrying any local setting changes.
     bool send_type_c_status_message() {
         if (last_recv_type_c_status_[0] != 0xCC) {
             pending_type_c_response_ = false;
@@ -1850,17 +2428,59 @@ private:
         if (auto maybe_temp = get_room_temp()) {
             send_buf_[9] = uint8_t(std::min(127.5f, std::max(0.0f, *maybe_temp)) * 2);
         }
+        if (pending_type_c_write_) {
+            apply_fields(protocol::FieldFrame::TypeC, send_buf_);
+            apply_type4_numbers(send_buf_);
+            send_buf_[7] |= 0x80;  // Settings were changed.
+        }
         send_buf_[12] = calc_checksum(send_buf_);
 
-        ESP_LOGD(TAG, "sending %s", format_hex_pretty(send_buf_, MsgLen).c_str());
+        ESP_LOGD(TAG, "sending %s", frame_text(send_buf_).text);
         UARTDevice::write_array(send_buf_, MsgLen);
         pending_type_c_response_ = false;
+        pending_type_c_write_ = false;
         pending_send_ = PendingSendKind::TypeC;
         pending_send_millis_ = millis();
         return true;
     }
 
+    // Type 5 installer settings. Like Type-A settings, a peer slave's copy is not trusted.
+    void process_type_d_settings_message(MessageSender sender, const uint8_t* buffer) {
+        if (sender == MessageSender::Slave) {
+            return;
+        }
+        memcpy(last_recv_type_d_settings_, buffer, MsgLen);
+        if (pending_send_ != PendingSendKind::TypeD &&
+            pending_echo_retry_kind_ != PendingSendKind::TypeD) {
+            update_fields(protocol::FieldFrame::TypeD, buffer);
+        }
+    }
+
+    // Send Type 5 or Type 6 installer settings as a modified copy of the last received message.
+    void send_installer_settings_message(protocol::FieldFrame frame, PendingSendKind kind) {
+        memcpy(send_buf_, field_shadow(frame), MsgLen);
+        send_buf_[0] = (slave_ ? 0x28 : 0xA8) | protocol::field_frame_type(frame);
+        apply_fields(frame, send_buf_);
+        send_buf_[12] = calc_checksum(send_buf_);
+
+        ESP_LOGD(TAG, "sending %s", frame_text(send_buf_).text);
+        UARTDevice::write_array(send_buf_, MsgLen);
+        pending_send_ = kind;
+        pending_send_millis_ = millis();
+    }
+
     void process_type_e_message(MessageSender sender, const uint8_t* buffer) {
+        if (buffer[1] == protocol::kTypeESettingsSubtype) {
+            if (sender == MessageSender::Slave) {
+                return;
+            }
+            memcpy(last_recv_type_e_settings_, buffer, MsgLen);
+            if (pending_send_ != PendingSendKind::TypeE &&
+                pending_echo_retry_kind_ != PendingSendKind::TypeE) {
+                update_fields(protocol::FieldFrame::TypeE, buffer);
+            }
+            return;
+        }
         if (sender != MessageSender::Unit || buffer[1] != 0x80) {
             publish_unsupported_message(buffer);
             return;
@@ -1885,6 +2505,10 @@ private:
         if (sender == MessageSender::Unit && protocol_entities_.type7_power_raw != nullptr) {
             uint32_t raw = (uint32_t(buffer[2]) << 16) | (uint32_t(buffer[3]) << 8) | buffer[4];
             protocol_entities_.type7_power_raw->publish_state(raw);
+        }
+        if (sender == MessageSender::Unit && protocol_entities_.power != nullptr) {
+            protocol_entities_.power->publish_state(
+                protocol::decode_type7_power_watts(buffer) / 1000.0f);
         }
         publish_unsupported_message(buffer);
     }
@@ -1941,6 +2565,9 @@ private:
                 }
             }
         }
+
+        update_reservation(on_timer_, /* turn_on = */ true, now);
+        update_reservation(off_timer_, /* turn_on = */ false, now);
 
         // A full echoed frame takes about 1.25 seconds at 104 baud. Wait three seconds before
         // classifying a send as collided/missing, then retry the same transaction kind.
@@ -2004,7 +2631,7 @@ private:
 
         if (pending_echo_retry_) {
             memcpy(send_buf_, echo_retry_buf_, MsgLen);
-            ESP_LOGD(TAG, "retrying %s", format_hex_pretty(send_buf_, MsgLen).c_str());
+            ESP_LOGD(TAG, "retrying %s", frame_text(send_buf_).text);
             UARTDevice::write_array(send_buf_, MsgLen);
             pending_send_ = pending_echo_retry_kind_;
             pending_send_millis_ = millis();
@@ -2036,8 +2663,19 @@ private:
                 ++initial_type_b_request_count_;
             }
         }
-        if (pending_type_c_response_) {
+        if (pending_type_c_response_ ||
+            (pending_type_c_write_ && last_recv_type_c_status_[0] == 0xCC)) {
             send_type_c_status_message();
+            return;
+        }
+        if (pending_type_d_write_ && last_recv_type_d_settings_[0] != 0) {
+            pending_type_d_write_ = false;
+            send_installer_settings_message(protocol::FieldFrame::TypeD, PendingSendKind::TypeD);
+            return;
+        }
+        if (pending_type_e_write_ && last_recv_type_e_settings_[0] != 0) {
+            pending_type_e_write_ = false;
+            send_installer_settings_message(protocol::FieldFrame::TypeE, PendingSendKind::TypeE);
             return;
         }
         if (pending_type_b_query_ && !slave_) {
