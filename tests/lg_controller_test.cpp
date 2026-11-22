@@ -422,8 +422,17 @@ void test_captured_ducted_unit_frames() {
  CHECK(f.switches[3].state && !f.switches[4].state && !f.switches[5].state && f.switches[6].state);
  CHECK(zone_type_new.state);
  CHECK(filter_hours.state==458); CHECK(room.state==23); CHECK(power.state==0);
+ // The wall controller sets the vertical swing bit in every frame and the unit never does.
+ // Before the capabilities are known that reads as a swing mode.
+ f.receive(master); CHECK(f.controller.swing_mode==climate::CLIMATE_SWING_VERTICAL);
+ // The unit's capabilities message: ducted, no swing, no extra fan speeds.
+ f.receive({0xC9,0x12,0xEB,0x5C,0x26,0x3C,0x00,0x84,0xEF,0x57,0x0F,0x83,0xB5});
+ CHECK(f.controller.custom_fan_modes.empty());
+ f.receive(master); CHECK(f.controller.swing_mode==climate::CLIMATE_SWING_OFF);
+ f.tick(500); CHECK(f.controller.tx.empty());
  // Home Assistant asked for fan high right after a master heartbeat. The installed firmware
- // sent this exact frame and both the wall controller and the unit followed it.
+ // sent this exact frame and both the wall controller and the unit followed it. The
+ // unsupported swing bit goes out as the wall controller last sent it.
  f.receive(master);
  climate::ClimateCall call; call.fan_mode=climate::CLIMATE_FAN_HIGH; f.controller.control(call);
  auto sent=f.send_next();

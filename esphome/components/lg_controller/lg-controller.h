@@ -1238,6 +1238,18 @@ private:
         }
     }
 
+    // Swing bits of Type-0 byte 2 that this unit uses. Until the capabilities are known both are
+    // assumed. A wall controller on a ducted unit was seen setting the vertical bit in every
+    // frame while the unit reported it clear; such a bit is neither shown as a swing mode nor
+    // changed when sending.
+    uint8_t swing_mask() {
+        if (nvs_storage_.capabilities_message[0] == 0) {
+            return 0x40 | 0x80;
+        }
+        return (parse_capability(LgCapability::HORIZONTAL_SWING) ? 0x40 : 0) |
+               (parse_capability(LgCapability::VERTICAL_SWING) ? 0x80 : 0);
+    }
+
     bool validate_zone_control(size_t index) const {
         if (index >= 8) {
             ESP_LOGE(TAG, "Unexpected zone index: %u", static_cast<unsigned>(index));
@@ -1484,28 +1496,31 @@ private:
         }
         send_buf_[1] = b;
 
-        // Byte 2: swing mode and purifier/plasma setting. Preserve the other bits.
-        b = last_recv_status_[2] & ~(0x4|0x40|0x80);
+        // Byte 2: swing mode and purifier/plasma setting. Preserve the other bits, including
+        // swing bits the unit does not support.
+        uint8_t swing = swing_mask();
+        b = last_recv_status_[2] & ~(0x4 | swing);
         if (purifier_.state) {
             b |= 0x4;
         }
+        uint8_t swing_bits = 0;
         switch (this->swing_mode) {
             case climate::CLIMATE_SWING_OFF:
                 break;
             case climate::CLIMATE_SWING_HORIZONTAL:
-                b |= 0x40;
+                swing_bits = 0x40;
                 break;
             case climate::CLIMATE_SWING_VERTICAL:
-                b |= 0x80;
+                swing_bits = 0x80;
                 break;
             case climate::CLIMATE_SWING_BOTH:
-                b |= 0x40 | 0x80;
+                swing_bits = 0x40 | 0x80;
                 break;
             default:
                 ESP_LOGE(TAG, "unknown swing mode");
                 break;
         }
-        send_buf_[2] = b;
+        send_buf_[2] = b | (swing_bits & swing);
 
         // Byte 3. A reservation this controller owns keeps the flag set until it ends.
         bool own_reservation = on_timer_.owned || off_timer_.owned;
@@ -2019,8 +2034,8 @@ private:
         purifier_.publish_state(buffer[2] & 0x4);
         update_fields(protocol::FieldFrame::Status, buffer);
 
-        bool horiz_swing = buffer[2] & 0x40;
-        bool vert_swing = buffer[2] & 0x80;
+        bool horiz_swing = buffer[2] & swing_mask() & 0x40;
+        bool vert_swing = buffer[2] & swing_mask() & 0x80;
         if (horiz_swing && vert_swing) {
             set_swing_mode(climate::CLIMATE_SWING_BOTH, true);
         } else if (horiz_swing) {
