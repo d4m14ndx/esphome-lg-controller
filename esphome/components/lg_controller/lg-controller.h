@@ -206,6 +206,18 @@ public:
 constexpr int8_t TempConversion::FahToLGCel[];
 constexpr int8_t TempConversion::LGCelToCelAdjustment[];
 
+// A frame as text ("A8.00.00..."), for logging and diagnostic entities. The buffer lives in the
+// returned object, so `frame_text(frame).text` is valid for the rest of the statement.
+struct FrameText {
+    char text[format_hex_pretty_size(protocol::kFrameSize)];
+};
+
+inline FrameText frame_text(const uint8_t* frame) {
+    FrameText result;
+    format_hex_pretty_to(result.text, frame, protocol::kFrameSize, '.');
+    return result;
+}
+
 class LgController final : public climate::Climate, public uart::UARTDevice, public Component {
     static constexpr size_t MsgLen = protocol::kFrameSize;
 
@@ -893,7 +905,7 @@ public:
             ESP_LOGCONFIG(TAG, "  Capabilities: not received from the unit yet");
             return;
         }
-        ESP_LOGCONFIG(TAG, "  Capabilities: %s", format_hex_pretty(capabilities, MsgLen).c_str());
+        ESP_LOGCONFIG(TAG, "  Capabilities: %s", frame_text(capabilities).text);
         ESP_LOGCONFIG(TAG, "  Unit type code: %u", capabilities[1] & 0x07);
         for (const auto& flag : protocol::kCapabilityFlags) {
             if ((capabilities[flag.byte] & flag.mask) != 0) {
@@ -1103,9 +1115,8 @@ private:
 
     void publish_capabilities() {
         if (protocol_entities_.capabilities != nullptr && nvs_storage_.capabilities_message[0] != 0) {
-            char text[format_hex_pretty_size(MsgLen)];
-            format_hex_pretty_to(text, nvs_storage_.capabilities_message, MsgLen, '.');
-            protocol_entities_.capabilities->publish_state(text);
+            protocol_entities_.capabilities->publish_state(
+                frame_text(nvs_storage_.capabilities_message).text);
         }
     }
 
@@ -1645,7 +1656,7 @@ private:
         // Byte 12.
         send_buf_[12] = calc_checksum(send_buf_);
 
-        ESP_LOGD(TAG, "sending %s", format_hex_pretty(send_buf_, MsgLen).c_str());
+        ESP_LOGD(TAG, "sending %s", frame_text(send_buf_).text);
         UARTDevice::write_array(send_buf_, MsgLen);
 
         status_write_in_flight_ = pending_status_change_;
@@ -1711,7 +1722,7 @@ private:
 
         send_buf_[12] = calc_checksum(send_buf_);
 
-        ESP_LOGD(TAG, "sending %s", format_hex_pretty(send_buf_, MsgLen).c_str());
+        ESP_LOGD(TAG, "sending %s", frame_text(send_buf_).text);
         UARTDevice::write_array(send_buf_, MsgLen);
 
         pending_type_a_settings_change_ = false;
@@ -1760,7 +1771,7 @@ private:
 
         send_buf_[12] = calc_checksum(send_buf_);
 
-        ESP_LOGD(TAG, "sending %s", format_hex_pretty(send_buf_, MsgLen).c_str());
+        ESP_LOGD(TAG, "sending %s", frame_text(send_buf_).text);
         UARTDevice::write_array(send_buf_, MsgLen);
 
         uint32_t now = millis();
@@ -1777,7 +1788,7 @@ private:
     }
 
     void process_message(const uint8_t* buffer) {
-        ESP_LOGD(TAG, "received %s", format_hex_pretty(buffer, MsgLen).c_str());
+        ESP_LOGD(TAG, "received %s", frame_text(buffer).text);
 
         if (pending_send_ != PendingSendKind::None && memcmp(send_buf_, buffer, MsgLen) == 0) {
             ESP_LOGD(TAG, "verified send");
@@ -2341,7 +2352,7 @@ private:
     void publish_unsupported_message(const uint8_t* buffer) {
         if (protocol_entities_.last_unsupported_message != nullptr) {
             protocol_entities_.last_unsupported_message->publish_state(
-                format_hex_pretty(buffer, MsgLen));
+                frame_text(buffer).text);
         }
     }
 
@@ -2424,7 +2435,7 @@ private:
         }
         send_buf_[12] = calc_checksum(send_buf_);
 
-        ESP_LOGD(TAG, "sending %s", format_hex_pretty(send_buf_, MsgLen).c_str());
+        ESP_LOGD(TAG, "sending %s", frame_text(send_buf_).text);
         UARTDevice::write_array(send_buf_, MsgLen);
         pending_type_c_response_ = false;
         pending_type_c_write_ = false;
@@ -2452,7 +2463,7 @@ private:
         apply_fields(frame, send_buf_);
         send_buf_[12] = calc_checksum(send_buf_);
 
-        ESP_LOGD(TAG, "sending %s", format_hex_pretty(send_buf_, MsgLen).c_str());
+        ESP_LOGD(TAG, "sending %s", frame_text(send_buf_).text);
         UARTDevice::write_array(send_buf_, MsgLen);
         pending_send_ = kind;
         pending_send_millis_ = millis();
@@ -2620,7 +2631,7 @@ private:
 
         if (pending_echo_retry_) {
             memcpy(send_buf_, echo_retry_buf_, MsgLen);
-            ESP_LOGD(TAG, "retrying %s", format_hex_pretty(send_buf_, MsgLen).c_str());
+            ESP_LOGD(TAG, "retrying %s", frame_text(send_buf_).text);
             UARTDevice::write_array(send_buf_, MsgLen);
             pending_send_ = pending_echo_retry_kind_;
             pending_send_millis_ = millis();
