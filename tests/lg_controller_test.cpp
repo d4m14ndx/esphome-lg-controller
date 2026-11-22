@@ -399,7 +399,44 @@ void test_power_and_capability_sensors() {
  static_cast<Component&>(f.controller).dump_config();
 }
 
+// Frames captured on 22 November 2026 from an LG B70AWY ducted unit (indoor B70AWYN9L6) with an
+// LG wall controller as master, this controller as slave, and four configured zones of which
+// zones 1 and 4 were open. Literal bytes including checksums; the unit was in fan-only mode.
+void test_captured_ducted_unit_frames() {
+ const protocol::Frame master{0xA8,0x0A,0x80,0,0,0xC8,0x05,0x1A,0,0,0,0,0x4C};
+ const protocol::Frame unit{0xC8,0x0A,0x00,0,0,0xC8,0x05,0x1A,0,0,0,0,0xEC};
+ const protocol::Frame type4{0xCC,0xCA,0x41,0,0,0,0x14,0x10,0,0x2E,0x20,0,0x1C};
+ const protocol::Frame type7{0xCF,0,0,0,0,0,0,0,0,0,0,0,0x9A};
+ Fixture f(4,true);
+ sensor::Sensor filter_hours,room,power; binary_sensor::BinarySensor zone_type_new;
+ f.controller.set_filter_time_remaining_sensor(&filter_hours);
+ f.controller.set_type4_room_temperature_sensor(&room);
+ f.controller.set_power_sensor(&power);
+ f.controller.set_zone_type_new_binary_sensor(&zone_type_new);
+ f.controller.timeouts.at("initial_send")();
+ f.receive(master); f.send_next(); // A slave announces its restored state once.
+ f.receive(unit); f.receive(type4); f.receive(type7);
+ CHECK(f.controller.mode==climate::CLIMATE_MODE_FAN_ONLY);
+ CHECK(f.controller.fan_mode==climate::CLIMATE_FAN_LOW);
+ CHECK(f.controller.target_temperature==20);
+ CHECK(f.switches[3].state && !f.switches[4].state && !f.switches[5].state && f.switches[6].state);
+ CHECK(zone_type_new.state);
+ CHECK(filter_hours.state==458); CHECK(room.state==23); CHECK(power.state==0);
+ // Home Assistant asked for fan high right after a master heartbeat. The installed firmware
+ // sent this exact frame and both the wall controller and the unit followed it.
+ f.receive(master);
+ climate::ClimateCall call; call.fan_mode=climate::CLIMATE_FAN_HIGH; f.controller.control(call);
+ auto sent=f.send_next();
+ CHECK((sent==std::vector<uint8_t>{0x28,0x4B,0x80,0,0,0xC8,0x05,0x14,0,0,0,0,0x81}));
+ // Opening zone 2 changes only its own bit.
+ f.receive(master);
+ f.switches[4].turn_on();
+ sent=f.send_next();
+ CHECK(sent[5]==0xE8); CHECK(sent[10]==0); CHECK(sent[2]==0x80);
+}
+
 int main() {
+ test_captured_ducted_unit_frames();
  test_status_fields_overlay_only_their_bits();
  test_slave_sends_status_field_with_slave_header();
  test_type_a_fields_wait_for_unit_settings();
