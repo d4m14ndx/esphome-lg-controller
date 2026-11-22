@@ -499,7 +499,10 @@ class LgController final : public climate::Climate, public uart::UARTDevice, pub
         // capability bits describe the maximum, not the number actually installed.
         if (configured_zone_count_ > 0) {
             set_zone_count(configured_zone_count_);
-        } else if (!zone_protocol_supported_) {
+        } else if (!zone_protocol_supported_ || zone_count_ > zone_capacity_) {
+            // A later capability frame may contradict a previously learned count.
+            // Invalidate discovery instead of guessing a smaller installed count;
+            // set_zone_count also clears ownership of the overlapping zone bits.
             set_zone_count(0);
         }
     }

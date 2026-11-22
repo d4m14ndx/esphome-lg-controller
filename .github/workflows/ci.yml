@@ -22,10 +22,7 @@ jobs:
         run: python -m pip install "esphome==2026.6.4"
 
       - name: Run protocol tests
-        run: |
-          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -I. \
-            tests/lg_protocol_test.cpp -o /tmp/lg_protocol_test
-          /tmp/lg_protocol_test
+        run: sh tests/run-native-tests.sh
 
       - name: Validate ESPHome fixtures
         env:

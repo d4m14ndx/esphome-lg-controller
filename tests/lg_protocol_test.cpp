@@ -46,6 +46,34 @@ void append(std::vector<uint8_t>& bytes, const protocol::Frame& frame) {
     bytes.insert(bytes.end(), frame.begin(), frame.end());
 }
 
+void test_documented_frames_keep_original_checksums() {
+    // Literal examples from protocol.md, Type 6 subtype 0x80 and Type 7,
+    // at e31f29f. These are documentation fixtures, NOT household captures.
+    // Do not regenerate checksums: independent bytes catch checksum regressions
+    // that make_frame() would otherwise reproduce on both sides of an assertion.
+    const std::array<protocol::Frame, 4> frames{{
+        {{0xAE, 0x80, 0x3C, 0x0F, 0x17, 0x00, 0x2A, 0x74, 0x02, 0x00, 0x12, 0x04, 0x13}},
+        {{0xCF, 0x00, 0x12, 0x34, 0x56, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3E}},
+        {{0xCF, 0x00, 0x98, 0x76, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64}},
+        {{0xCF, 0x00, 0xAB, 0xCD, 0xEF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x63}},
+    }};
+    std::vector<uint8_t> stream;
+    for (const auto& frame : frames) {
+        CHECK(protocol::is_valid_frame(frame));
+        append(stream, frame);
+        // Every single-bit corruption, including the original checksum, must
+        // be rejected without recomputing the checksum of the damaged frame.
+        for (std::size_t byte = 0; byte < frame.size(); ++byte) {
+            for (unsigned bit = 0; bit < 8; ++bit) {
+                auto damaged = frame;
+                damaged[byte] ^= static_cast<uint8_t>(1U << bit);
+                CHECK(!protocol::is_valid_frame(damaged));
+            }
+        }
+    }
+    CHECK(parse(stream) == std::vector<protocol::Frame>(frames.begin(), frames.end()));
+}
+
 void test_checksum_and_header_validation() {
     const protocol::Frame frame = make_frame(0xC8, 0x10);
     CHECK(protocol::has_valid_header(0x28));
@@ -293,6 +321,7 @@ void test_type3_zone_count() {
 }  // namespace
 
 int main() {
+    test_documented_frames_keep_original_checksums();
     test_checksum_and_header_validation();
     test_capability_masks();
     test_transaction_state_helpers();
